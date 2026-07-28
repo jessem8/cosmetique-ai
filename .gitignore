@@ -1,0 +1,47 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# JavaScript
+node_modules/
+dist/
+build/
+coverage/
+playwright-report/
+test-results/
+
+# Runtime and private data
+uploads/
+artifacts/
+generated/
+outputs/
+data/raw/
+data/processed/
+data/metadata/
+evaluation/private/
+
+# Notebooks and tooling
+.ipynb_checkpoints/
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
