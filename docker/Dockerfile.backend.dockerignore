@@ -1,0 +1,17 @@
+**
+!backend/
+!backend/**
+!ai_core/
+!ai_core/**
+!docker/
+!docker/Dockerfile.backend
+backend/.venv/
+backend/.pytest_cache/
+backend/tests/
+backend/**/__pycache__/
+backend/artifacts/
+backend/.env
+ai_core/.venv/
+ai_core/.pytest_cache/
+ai_core/tests/
+ai_core/**/__pycache__/

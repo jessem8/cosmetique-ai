@@ -1,250 +1,344 @@
-import { useState, useEffect, useRef } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
-import { generations } from '../api/client.js'
-import StepLoader, { PIPELINE_STEPS } from '../components/StepLoader.jsx'
+import { useEffect, useRef, useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import {
+  ArrowClockwise,
+  ArrowLeft,
+  CheckCircle,
+  CloudSlash,
+  WarningCircle,
+} from '@phosphor-icons/react'
+import { generations, products } from '../api/client.js'
+import CandidateSelector from '../components/CandidateSelector.jsx'
+import GenerationTimeline from '../components/GenerationTimeline.jsx'
+import { useGenerationPolling } from '../hooks/useGenerationPolling.js'
+import { createIdempotencyKey } from '../utils/idempotency.js'
 
-const STATUS_STEP_MAP = {
-  pending: 0,
-  processing: 1,
-  done: PIPELINE_STEPS.length - 1,
-  error: -1,
+const ERROR_PRESENTATION = {
+  AI_SERVICE_UNAVAILABLE: {
+    title: 'Studio IA indisponible',
+    body: 'La session de calcul ne répond pas. Relancez la campagne lorsque le service est prêt.',
+    icon: CloudSlash,
+  },
+  AI_RUNTIME_LOST: {
+    title: 'Session IA interrompue',
+    body: 'La session GPU a changé ou s’est arrêtée. Aucun résultat dégradé n’a été enregistré.',
+    icon: CloudSlash,
+  },
+  TARGET_NOT_FOUND: {
+    title: 'Produit introuvable',
+    body: 'Le produit n’a pas pu être isolé avec assez de confiance. Essayez une photo plus nette.',
+    icon: WarningCircle,
+  },
+  EXTRACTION_FAILED: {
+    title: 'Extraction impossible',
+    body: 'Le contour du produit ne satisfait pas les contrôles de qualité.',
+    icon: WarningCircle,
+  },
+  MASK_QUALITY_FAILED: {
+    title: 'Contour insuffisant',
+    body: 'Le masque ne préserve pas encore le produit avec la précision requise.',
+    icon: WarningCircle,
+  },
+  CLAIM_SAFETY_FAILED: {
+    title: 'Texte non conforme aux preuves',
+    body: 'Le texte proposé ne respecte pas strictement les informations vérifiées.',
+    icon: WarningCircle,
+  },
 }
 
 function Generation() {
   const { id } = useParams()
   const navigate = useNavigate()
-  const [genData, setGenData] = useState(null)
-  const [error, setError] = useState('')
-  const [timeLeft, setTimeLeft] = useState(90)
-  const [currentStepIdx, setCurrentStepIdx] = useState(0)
-  const intervalRef = useRef(null)
-  const timerRef = useRef(null)
-  const stepCycleRef = useRef(null)
+  const {
+    generation,
+    error: transportError,
+    isLoading,
+    isReconnecting,
+    refresh,
+  } = useGenerationPolling(id)
+  const [originalUrl, setOriginalUrl] = useState(null)
+  const [originalImageError, setOriginalImageError] = useState(null)
+  const [originalImageLoading, setOriginalImageLoading] = useState(true)
+  const [imageAttempt, setImageAttempt] = useState(0)
+  const [selectionError, setSelectionError] = useState(null)
+  const [selecting, setSelecting] = useState(false)
+  const selectionRequestRef = useRef({ fingerprint: null, key: null })
 
-  // Countdown timer
   useEffect(() => {
-    timerRef.current = setInterval(() => {
-      setTimeLeft((t) => (t > 0 ? t - 1 : 0))
-    }, 1000)
-    return () => clearInterval(timerRef.current)
-  }, [])
+    if (generation?.status === 'done') {
+      navigate(`/result/${generation.id}`, { replace: true })
+    }
+  }, [generation, navigate])
 
-  // Step animation cycle (while processing)
   useEffect(() => {
-    stepCycleRef.current = setInterval(() => {
-      setCurrentStepIdx((idx) =>
-        idx < PIPELINE_STEPS.length - 1 ? idx + 1 : idx
-      )
-    }, 12000)
-    return () => clearInterval(stepCycleRef.current)
-  }, [])
-
-  // Polling
-  useEffect(() => {
-    if (!id) return
-
-    const poll = async () => {
-      try {
-        const res = await generations.get(id)
-        const data = res.data
-        setGenData(data)
-
-        if (data.status === 'done') {
-          clearInterval(intervalRef.current)
-          clearInterval(timerRef.current)
-          clearInterval(stepCycleRef.current)
-          // Small delay for UX
-          setTimeout(() => navigate(`/result/${id}`), 800)
-        } else if (data.status === 'error') {
-          clearInterval(intervalRef.current)
-          clearInterval(timerRef.current)
-          setError(data.error_message || 'Une erreur est survenue lors de la génération.')
-        }
-      } catch (err) {
-        const msg =
-          err.response?.data?.detail ||
-          err.message ||
-          'Impossible de récupérer le statut.'
-        setError(msg)
-        clearInterval(intervalRef.current)
-      }
+    if (
+      generation?.status !== 'error' ||
+      generation?.error?.code !== 'TARGET_AMBIGUOUS' ||
+      !generation.product_id
+    ) {
+      setOriginalUrl(null)
+      setOriginalImageError(null)
+      setOriginalImageLoading(true)
+      return undefined
     }
 
-    poll() // immediate first call
-    intervalRef.current = setInterval(poll, 2500)
+    const controller = new AbortController()
+    let objectUrl = null
+    setOriginalUrl(null)
+    setOriginalImageError(null)
+    setOriginalImageLoading(true)
+
+    products
+      .getImage(generation.product_id, { signal: controller.signal })
+      .then((response) => {
+        if (controller.signal.aborted) return
+        objectUrl = URL.createObjectURL(response.data)
+        setOriginalUrl(objectUrl)
+      })
+      .catch((requestError) => {
+        if (
+          !controller.signal.aborted &&
+          requestError.code !== 'REQUEST_CANCELLED'
+        ) {
+          setOriginalImageError(requestError)
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setOriginalImageLoading(false)
+      })
 
     return () => {
-      clearInterval(intervalRef.current)
+      controller.abort()
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [id, navigate])
+  }, [
+    generation?.error?.code,
+    generation?.id,
+    generation?.product_id,
+    generation?.status,
+    imageAttempt,
+  ])
 
-  const formatTime = (seconds) => {
-    if (seconds <= 0) return 'Finalisation...'
-    const m = Math.floor(seconds / 60)
-    const s = seconds % 60
-    if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`
-    return `${s}s`
+  const retryOriginalImage = () => {
+    setOriginalImageError(null)
+    setOriginalImageLoading(true)
+    setImageAttempt((current) => current + 1)
   }
 
-  const status = genData?.status || 'pending'
-  const productName = genData?.product_name || genData?.product?.name || 'Votre produit'
-  const productBrand = genData?.product?.brand || genData?.brand || ''
-
-  const statusMessages = {
-    pending: 'En file d\'attente...',
-    processing: 'Génération en cours...',
-    done: 'Génération terminée ! Redirection...',
-    error: 'Une erreur est survenue.',
+  const handleCandidate = async (targetHint) => {
+    setSelecting(true)
+    setSelectionError(null)
+    const fingerprint = JSON.stringify({
+      source_generation_id: generation.id,
+      target_hint: targetHint,
+    })
+    if (selectionRequestRef.current.fingerprint !== fingerprint) {
+      selectionRequestRef.current = {
+        fingerprint,
+        key: createIdempotencyKey(),
+      }
+    }
+    try {
+      const response = await generations.create(
+        generation.product_id,
+        {
+          language: generation.language,
+          seed: generation.seed,
+          source_generation_id: generation.id,
+          target_hint: targetHint,
+        },
+        { idempotencyKey: selectionRequestRef.current.key }
+      )
+      const nextId = response.data.id || response.data.generation_id
+      navigate(`/generations/${nextId}`, { replace: true })
+    } catch (requestError) {
+      setSelectionError(requestError)
+    } finally {
+      setSelecting(false)
+    }
   }
 
-  const currentStep = PIPELINE_STEPS[currentStepIdx]
-
-  return (
-    <div className="generation-page">
-      {/* Background orbs */}
-      <div className="generation-orb generation-orb-1" />
-      <div className="generation-orb generation-orb-2" />
-      <div className="generation-orb generation-orb-3" />
-
-      <div className="generation-content animate-enter">
-        {/* Product info */}
-        <div
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '8px',
-            background: 'var(--gold-dim)',
-            border: '1px solid rgba(212,160,85,0.25)',
-            borderRadius: 'var(--radius-full)',
-            padding: '6px 16px',
-            marginBottom: '16px',
-            fontSize: '0.8rem',
-            color: 'var(--gold)',
-            fontWeight: 600,
-          }}
-        >
-          ✨ {status === 'done' ? 'Terminé !' : status === 'pending' ? 'En attente' : 'En cours de génération'}
+  if (isLoading && !generation) {
+    return (
+      <div className="workspace-page">
+        <div className="status-shell" aria-label="Chargement de la campagne">
+          <div className="skeleton skeleton--title" />
+          <div className="skeleton skeleton--body" />
+          <div className="skeleton skeleton--timeline" />
         </div>
+      </div>
+    )
+  }
 
-        <h1 className="generation-product-name">{productName}</h1>
-        {productBrand && (
-          <p className="generation-product-sub">par {productBrand}</p>
-        )}
-        {!productBrand && (
-          <p className="generation-product-sub">{statusMessages[status]}</p>
-        )}
+  if (!generation && transportError) {
+    return (
+      <div className="workspace-page">
+        <section className="empty-state empty-state--error">
+          <CloudSlash size={36} weight="light" aria-hidden="true" />
+          <h1>Connexion à la campagne impossible</h1>
+          <p>{transportError.message}</p>
+          <button type="button" className="button button--primary" onClick={refresh}>
+            <ArrowClockwise size={18} aria-hidden="true" />
+            Réessayer
+          </button>
+        </section>
+      </div>
+    )
+  }
 
-        {/* Error state */}
-        {error ? (
-          <div className="generation-error">
-            <div
-              style={{
-                fontSize: '2rem',
-                marginBottom: '12px',
-              }}
-            >
-              ⚠️
-            </div>
-            <h3
-              style={{
-                fontFamily: 'var(--font-heading)',
-                marginBottom: '8px',
-                color: 'var(--error)',
-              }}
-            >
-              Génération échouée
-            </h3>
-            <p
-              style={{
-                color: 'var(--text-secondary)',
-                fontSize: '0.9rem',
-                marginBottom: '20px',
-              }}
-            >
-              {error}
-            </p>
-            <div
-              style={{
-                display: 'flex',
-                gap: '10px',
-                justifyContent: 'center',
-                flexWrap: 'wrap',
-              }}
-            >
-              <button
-                className="btn btn-primary"
-                onClick={() => window.location.reload()}
-              >
-                🔄 Réessayer
-              </button>
-              <button
-                className="btn btn-ghost"
-                onClick={() => navigate('/dashboard')}
-              >
-                ← Retour au dashboard
-              </button>
-            </div>
+  if (
+    generation?.status === 'error' &&
+    generation.error?.code === 'TARGET_AMBIGUOUS'
+  ) {
+    return (
+      <div className="workspace-page workspace-page--wide">
+        <header className="page-heading">
+          <div>
+            <p className="eyebrow">Sélection requise</p>
+            <h1>Confirmez le bon produit.</h1>
+          </div>
+          <Link className="text-link" to="/dashboard">
+            <ArrowLeft size={16} aria-hidden="true" />
+            Retour à l’historique
+          </Link>
+        </header>
+        {originalUrl ? (
+          <CandidateSelector
+            imageUrl={originalUrl}
+            candidates={generation.ambiguity?.candidates || []}
+            onConfirm={handleCandidate}
+            isSubmitting={selecting}
+          />
+        ) : originalImageLoading ? (
+          <div
+            className="studio-panel"
+            role="status"
+            aria-label="Chargement de la photo originale"
+          >
+            <div className="skeleton skeleton--media" />
           </div>
         ) : (
-          <>
-            {/* Step loader */}
-            <StepLoader
-              currentStep={currentStep?.id}
-              steps={PIPELINE_STEPS}
-            />
-
-            {/* Status line */}
-            <p
-              style={{
-                marginTop: '16px',
-                color: 'var(--text-secondary)',
-                fontSize: '0.88rem',
-              }}
+          <section
+            className="asset-failure"
+            role="alert"
+            aria-labelledby="original-image-error-title"
+          >
+            <WarningCircle size={30} weight="light" aria-hidden="true" />
+            <div>
+              <h2 id="original-image-error-title">
+                Photo originale indisponible
+              </h2>
+              <p>
+                {generation.ambiguity?.candidates?.length === 1
+                  ? 'Le cadre détecté reste disponible et sera affiché dès que la photo répond.'
+                  : `${generation.ambiguity?.candidates?.length || 0} cadres détectés restent disponibles et seront affichés dès que la photo répond.`}
+              </p>
+              {originalImageError?.message && (
+                <p>{originalImageError.message}</p>
+              )}
+            </div>
+            <button
+              type="button"
+              className="button button--secondary"
+              onClick={retryOriginalImage}
             >
-              {statusMessages[status]}
-            </p>
-
-            {/* Timer */}
-            {status !== 'done' && (
-              <div className="generation-timer">
-                <span>⏱️ Temps estimé restant :</span>
-                <span className="generation-timer-value">
-                  {formatTime(timeLeft)}
-                </span>
-              </div>
-            )}
-
-            {/* Redirect notice when done */}
-            {status === 'done' && (
-              <div
-                style={{
-                  marginTop: '20px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '10px',
-                  color: 'var(--success)',
-                  fontWeight: 600,
-                }}
-              >
-                <div
-                  style={{
-                    width: '16px',
-                    height: '16px',
-                    border: '2px solid rgba(34,197,94,0.3)',
-                    borderTopColor: 'var(--success)',
-                    borderRadius: '50%',
-                    animation: 'spin 0.7s linear infinite',
-                  }}
-                />
-                Redirection vers les résultats...
-              </div>
-            )}
-          </>
+              <ArrowClockwise size={18} aria-hidden="true" />
+              Réessayer la photo
+            </button>
+          </section>
+        )}
+        {selectionError && (
+          <div className="inline-alert inline-alert--error" role="alert">
+            <p>{selectionError.message}</p>
+          </div>
         )}
       </div>
+    )
+  }
+
+  if (generation?.status === 'error') {
+    const presentation =
+      ERROR_PRESENTATION[generation.error?.code] || {
+        title: 'La campagne a été arrêtée',
+        body: generation.error?.message || 'La génération n’a pas abouti.',
+        icon: WarningCircle,
+      }
+    const ErrorIcon = presentation.icon
+
+    return (
+      <div className="workspace-page">
+        <section className="empty-state empty-state--error">
+          <ErrorIcon size={38} weight="light" aria-hidden="true" />
+          <p className="eyebrow">Échec explicite</p>
+          <h1>{presentation.title}</h1>
+          <p>{presentation.body}</p>
+          <div className="empty-state__actions">
+            <Link className="button button--primary" to="/new">
+              Créer une nouvelle campagne
+            </Link>
+            <Link className="button button--quiet" to="/dashboard">
+              Voir l’historique
+            </Link>
+          </div>
+        </section>
+      </div>
+    )
+  }
+
+  return (
+    <div className="workspace-page">
+      <header className="page-heading">
+        <div>
+          <p className="eyebrow">
+            {generation?.status === 'pending' ? 'En attente' : 'En création'}
+          </p>
+          <h1>Votre campagne prend forme.</h1>
+        </div>
+        <Link className="text-link" to="/dashboard">
+          <ArrowLeft size={16} aria-hidden="true" />
+          Retour à l’historique
+        </Link>
+      </header>
+
+      {isReconnecting && (
+        <div className="inline-alert" role="status" aria-live="polite">
+          <CloudSlash size={20} aria-hidden="true" />
+          <div>
+            <strong>Reconnexion en cours</strong>
+            <p>Le dernier état confirmé reste affiché.</p>
+          </div>
+        </div>
+      )}
+
+      <section className="status-shell" aria-live="polite">
+        <div className="status-shell__intro">
+          <div className="status-orbit" aria-hidden="true">
+            <span>CA</span>
+          </div>
+          <div>
+            <h2>
+              {generation?.status === 'pending'
+                ? 'Campagne enregistrée'
+                : 'Traitement sur le studio GPU'}
+            </h2>
+            <p>
+              Chaque étape apparaît uniquement après confirmation du service.
+            </p>
+          </div>
+        </div>
+        <GenerationTimeline
+          status={generation?.status}
+          stage={generation?.stage}
+          completedStages={generation?.completed_stages}
+        />
+        <div className="status-shell__truth">
+          <CheckCircle size={18} weight="light" aria-hidden="true" />
+          <span>Aucun résultat incomplet ne sera présenté comme terminé.</span>
+        </div>
+      </section>
     </div>
   )
 }
 
+export { ERROR_PRESENTATION }
 export default Generation

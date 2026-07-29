@@ -4,7 +4,7 @@ Security utilities: password hashing (bcrypt) + JWT (HS256).
 Design decisions:
  - bcrypt cost factor 12 (good balance security/speed)
  - JWT payload contains only user_id (UUID as str)
- - Token expiry is checked by python-jose automatically
+ - Token expiry is checked by PyJWT automatically
 """
 from __future__ import annotations
 
@@ -12,20 +12,27 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from jose import JWTError, jwt
 import bcrypt
+import jwt
+from jwt import InvalidTokenError
 
 def hash_password(plain: str) -> str:
-    """Hash a plaintext password using bcrypt."""
+    """Hash a plaintext password using bcrypt without silent truncation."""
+    encoded = plain.encode("utf-8")
+    if len(encoded) > 72:
+        raise ValueError("bcrypt passwords are limited to 72 UTF-8 bytes")
     salt = bcrypt.gensalt(rounds=12)
-    hashed = bcrypt.hashpw(plain.encode("utf-8"), salt)
+    hashed = bcrypt.hashpw(encoded, salt)
     return hashed.decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
     """Verify a plaintext password against a bcrypt hash."""
     try:
-        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+        encoded = plain.encode("utf-8")
+        if len(encoded) > 72:
+            return False
+        return bcrypt.checkpw(encoded, hashed.encode("utf-8"))
     except ValueError:
         return False
 
@@ -67,11 +74,14 @@ def decode_access_token(token: str) -> Optional[uuid.UUID]:
     """
     try:
         payload = jwt.decode(
-            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+            options={"require": ["sub", "iat", "exp"]},
         )
         sub: Optional[str] = payload.get("sub")
         if sub is None:
             return None
         return uuid.UUID(sub)
-    except (JWTError, ValueError):
+    except (InvalidTokenError, ValueError):
         return None

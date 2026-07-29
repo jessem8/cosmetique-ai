@@ -1,249 +1,166 @@
-# 🌟 Générateur de Contenu IA Cosmétique
+# Cosmetique AI
 
-> Pipeline IA modulaire : photo produit brute → affiches premium Instagram / Facebook / LinkedIn
+Private, reproducible product-ad studio for cosmetics and personal care.
+Cosmetique AI preserves the photographed product, generates only the background,
+and exports a complete evidence-bound campaign for Instagram, Facebook, and
+LinkedIn.
 
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi)](https://fastapi.tiangolo.com)
-[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react)](https://react.dev)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791?logo=postgresql)](https://postgresql.org)
-[![Colab](https://img.shields.io/badge/Google_Colab-GPU_T4-F9AB00?logo=googlecolab)](https://colab.research.google.com)
+## What V1 delivers
 
----
+- A French React interface with one French or English campaign per generation.
+- Exact RGB JPEG exports: Instagram `1080×1080`, Facebook `1200×630`, and
+  LinkedIn `1200×627`.
+- Platform-specific copy constrained to the product facts supplied by the user.
+- Evidence views for the original, mask, cutout, generated background, and final
+  composition.
+- A durable FastAPI/PostgreSQL job worker and private local artifact storage.
+- An authenticated asynchronous Colab GPU API exposed through a temporary
+  Cloudflare Quick Tunnel.
+- A strict eight-member ZIP with model revisions, stage receipts, dimensions,
+  MIME types, sizes, and checksums.
 
-## 📋 Table des matières
-
-1. [Architecture](#architecture)
-2. [Prérequis](#prérequis)
-3. [Lancement Backend (local)](#lancement-backend-local)
-4. [Lancement Frontend](#lancement-frontend)
-5. [Exécution sur Colab](#exécution-sur-colab)
-6. [Variables d'environnement](#variables-denvironnement)
-7. [API Reference](#api-reference)
-8. [Sécurité](#sécurité)
-
----
+There is no fake progress, silent fallback, queue-position promise, or degraded
+result marked as successful.
 
 ## Architecture
 
-```
-photo produit (JPEG/PNG)
-        │
-        ▼
-   POST /products          → upload Cloudinary + DB
-        │
-        ▼
-   POST /generations/{id}  → BackgroundTask
-        │
-   ┌────┴────────────────────────────────────────────────┐
-   │  PIPELINE IA (Colab GPU T4)                         │
-   │                                                      │
-   │  1. rembg          → détourage fond transparent     │
-   │  2. CATEGORY_MAP   → catégorie produit (6 types)    │
-   │  3. SDXL Inpaint   → fond premium généré            │
-   │  4. Pillow         → composition + ombre portée     │
-   │  5. Qwen2.5/Ollama → texte marketing JSON           │
-   │  6. Pillow         → affiche finale (3 templates)   │
-   │  7. Resize         → Instagram/Facebook/LinkedIn    │
-   │  8. Cloudinary     → upload URLs                    │
-   └────────────────────────────────────────────────────┘
-        │
-        ▼
-   GET /generations/{id}   → polling statut
-        │
-        ▼
-   GET /generations/{id}/assets  → 3 URLs finales
+```text
+Browser
+  │ same-origin /api/v1
+  ▼
+Nginx ── FastAPI ── PostgreSQL queue
+                     │
+                     ▼
+                   Worker
+                     │ authenticated /v1 polling
+                     ▼
+             Colab T4 + Quick Tunnel
+                     │
+                     ▼
+            validated atomic ZIP bundle
+                     │
+                     ▼
+             persistent local volume
 ```
 
----
+The browser never receives the Colab URL or bearer token. Colab receives image
+bytes and a validated request, never database or storage credentials.
 
-## Prérequis
+## Repository layout
 
-| Composant | Version | Notes |
-|-----------|---------|-------|
-| Python | 3.10+ | Backend + pipeline |
-| Node.js | 18+ | Frontend |
-| PostgreSQL | 14+ | Base de données locale |
-| Google Colab | — | Exécution pipeline IA (GPU T4 requis) |
-| Cloudinary | — | Compte gratuit (25 GB) |
-| ngrok | — | Compte gratuit pour tunnel |
-
----
-
-## Lancement Backend (local dev)
-
-```powershell
-# 1. Créer et activer l'environnement virtuel
-cd D:\Stage_1_ouvrier\backend
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-
-# 2. Installer les dépendances
-pip install -r requirements.txt
-
-# 3. Copier et configurer .env
-Copy-Item .env.example .env
-# Éditez .env avec votre PostgreSQL et Cloudinary
-
-# 4. Créer la base de données PostgreSQL
-# Via psql:
-# CREATE DATABASE cosmetique_ai;
-
-# 5. Appliquer les migrations
-alembic upgrade head
-
-# 6. (Optionnel) Insérer des données de test
-python seed.py
-
-# 7. Lancer le serveur
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```text
+ai_core/   Installable AI pipeline, lazy adapters, Colab API, validation, tests
+backend/   FastAPI API, PostgreSQL models, worker, private storage, migrations
+frontend/  React 18 / Vite French product interface
+notebook/  Fresh-T4 Run-all Colab notebook
+docker/    PostgreSQL, migration, API, worker, Nginx/frontend Compose stack
+data/      Private-evaluation templates; authorized images remain ignored
+docs/      Operations, evaluation, artifact, and security runbooks
 ```
 
-→ API disponible sur http://localhost:8000  
-→ Documentation Swagger : http://localhost:8000/docs
+## Start locally
 
----
+1. Start the authenticated Colab service and obtain its temporary Quick Tunnel
+   URL and bearer token.
+2. Copy `docker/.env.example` to the ignored `docker/.env`.
+3. Replace every required value with a unique high-entropy secret.
+4. From the repository root:
 
-## Lancement Frontend
-
-```powershell
-cd D:\Stage_1_ouvrier\frontend
-
-# 1. Installer les dépendances
-npm install
-
-# 2. Configurer l'URL de l'API
-Copy-Item .env.example .env.local
-# Mettez VITE_API_URL=http://localhost:8000 pour le dev local
-
-# 3. Démarrer le serveur de développement
-npm run dev
-```
-
-→ Frontend sur http://localhost:5173
-
----
-
-## Exécution sur Colab
-
-1. **Uploader le code** sur Google Drive :
-   - Copier `D:\Stage_1_ouvrier\backend\` dans `Google Drive/Stage_1_ouvrier/backend/`
-
-2. **Ouvrir le notebook** : `notebook/pipeline_ia_cosmetique.ipynb`
-   - Importer dans Google Colab depuis Drive
-
-3. **Configurer** (Cellule 3) :
-   - Renseigner `DATABASE_URL` avec ngrok TCP de votre PostgreSQL local
-   - Renseigner `CLOUDINARY_*` et `NGROK_TOKEN`
-
-4. **Exposer PostgreSQL local** via ngrok TCP :
    ```powershell
-   # Sur Windows — terminal séparé
-   ngrok tcp 5432
-   # → donne: tcp://0.tcp.ngrok.io:XXXXX
-   # Utilisez cette URL dans DATABASE_URL du notebook
+   docker compose --env-file .\docker\.env -f .\docker\docker-compose.yml config
+   docker compose --env-file .\docker\.env -f .\docker\docker-compose.yml up --build -d
+   docker compose --env-file .\docker\.env -f .\docker\docker-compose.yml ps
    ```
 
-5. **Exécuter les cellules dans l'ordre** (1 → 11)
+5. Open `http://localhost:<APP_PORT>`.
 
-6. **Copier l'URL ngrok** (Cellule 10) dans le frontend `.env.local` :
-   ```
-   VITE_API_URL=https://xxxx.ngrok-free.app
-   ```
+Full launch, verification, runtime-loss recovery, shutdown, and troubleshooting
+instructions are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
----
+## Development checks
 
-## Variables d'environnement
+AI core:
 
-### Backend (`backend/.env`)
-
-| Variable | Description | Exemple |
-|----------|-------------|---------|
-| `DATABASE_URL` | URL PostgreSQL | `postgresql://postgres:your_password@localhost:5432/cosmetique_ai` |
-| `SECRET_KEY` | Clé JWT (32+ chars) | `openssl rand -hex 32` |
-| `ALGORITHM` | Algorithme JWT | `HS256` |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | Durée token | `30` |
-| `CLOUDINARY_CLOUD_NAME` | Nom Cloudinary | `my-cloud` |
-| `CLOUDINARY_API_KEY` | API Key Cloudinary | `123456789` |
-| `CLOUDINARY_API_SECRET` | API Secret | `abc...` |
-| `CORS_ORIGINS` | Origines CORS | `http://localhost:5173` |
-| `MAX_UPLOAD_SIZE_MB` | Taille max upload | `10` |
-
-### Frontend (`frontend/.env.local`)
-
-| Variable | Description |
-|----------|-------------|
-| `VITE_API_URL` | URL de l'API FastAPI |
-
----
-
-## API Reference
-
-### Auth
-| Method | Endpoint | Description | Auth |
-|--------|----------|-------------|------|
-| POST | `/auth/register` | Créer un compte | ❌ |
-| POST | `/auth/login` | Connexion → JWT | ❌ |
-
-### Products
-| Method | Endpoint | Description | Auth |
-|--------|----------|-------------|------|
-| POST | `/products` | Upload image + métadonnées | ✅ |
-| GET | `/products` | Liste des produits | ✅ |
-| GET | `/products/{id}` | Détail produit | ✅ |
-
-### Generations
-| Method | Endpoint | Description | Auth |
-|--------|----------|-------------|------|
-| POST | `/generations/{product_id}` | Lancer pipeline IA | ✅ |
-| GET | `/generations/{id}` | Statut + résultat | ✅ |
-| GET | `/generations/{id}/assets` | 3 assets finaux | ✅ |
-| POST | `/generations/{id}/regenerate-text` | Relancer texte | ✅ |
-| POST | `/generations/{id}/regenerate-decor` | Relancer décor | ✅ |
-
----
-
-## Sécurité
-
-| Mesure | Détail |
-|--------|--------|
-| **Mots de passe** | bcrypt cost 12 |
-| **JWT** | HS256, expiry 30 min |
-| **Timing attack** | `verify_password` appelé même si user inexistant |
-| **User enumeration** | Message d'erreur générique sur register/login |
-| **File upload** | Validation magic bytes + MIME type + taille max |
-| **Authorization** | Vérification `user_id` sur chaque ressource |
-| **Rate limiting** | 10 req/min register, 20 req/min login, 200 req/min global |
-| **CORS** | Origines whitelist uniquement |
-| **Headers** | X-Content-Type-Options, X-Frame-Options, X-XSS-Protection |
-| **SQL injection** | SQLAlchemy ORM (requêtes paramétrées) |
-
----
-
-## Structure du projet
-
+```powershell
+cd ai_core
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[test]"
+.\.venv\Scripts\python.exe -m pytest -q
 ```
-Stage_1_ouvrier/
-├── backend/                # FastAPI
-│   ├── app/
-│   │   ├── core/          # config.py, security.py
-│   │   ├── routers/       # auth.py, products.py, generations.py
-│   │   ├── services/      # pipeline.py, storage.py
-│   │   ├── database.py
-│   │   ├── models.py
-│   │   ├── schemas.py
-│   │   ├── dependencies.py
-│   │   └── main.py
-│   ├── alembic/           # migrations
-│   ├── seed.py
-│   └── requirements.txt
-│
-├── frontend/               # React.js (Vite)
-│   └── src/
-│       ├── pages/         # Login, Register, Dashboard, Upload, Generation, Result
-│       ├── components/    # Navbar, PosterPreview, StepLoader, AssetCard
-│       └── api/           # client.js (axios)
-│
-├── notebook/               # Google Colab
-│   └── pipeline_ia_cosmetique.ipynb
-│
-└── docker/                 # (BLOC 6 — plus tard)
+
+Backend:
+
+```powershell
+cd backend
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pytest -q
 ```
+
+Frontend:
+
+```powershell
+cd frontend
+npm ci
+npm run lint
+npm run test:run
+npm run build
+npm run test:e2e
+```
+
+GPU model imports are lazy; CPU contract tests do not download or load model
+weights.
+
+## API surface
+
+Website API:
+
+```text
+POST /api/v1/products
+GET  /api/v1/products/{product_id}/image
+POST /api/v1/products/{product_id}/generations
+GET  /api/v1/generations/{id}
+GET  /api/v1/generations/{id}/bundle
+GET  /api/v1/generations/{id}/artifacts/{artifact_name}
+GET  /api/v1/generations?cursor=&limit=
+```
+
+Authenticated Colab API:
+
+```text
+GET  /v1/health
+POST /v1/jobs
+GET  /v1/jobs/{id}
+GET  /v1/jobs/{id}/bundle
+```
+
+Generation creation requires an opaque `Idempotency-Key`. The lifecycle is
+`pending → processing → done | error`, with only objectively completed stages
+reported.
+
+## Model policy
+
+- Grounding DINO Tiny for candidate detection.
+- SAM Base for segmentation.
+- SDXL Base for the background only.
+- Qwen 2.5 7B Instruct in 4-bit for structured copy after SDXL unload.
+- BiRefNet disabled by default and allowed only as a reviewed, pinned crop-level
+  fallback.
+- No RMBG-2.0 default, fine-tuning, or LoRA in V1.
+
+Every production model revision is pinned and written into the manifest.
+
+## Documentation
+
+- [Operations and Colab recovery](docs/OPERATIONS.md)
+- [V1 API contract](docs/API.md)
+- [Private evaluation protocol](docs/EVALUATION.md)
+- [Artifact and manifest contract](docs/ARTIFACTS.md)
+- [Security and privacy operations](SECURITY.md)
+
+## Release truth
+
+A gate is accepted only with execution evidence. In particular, a fresh Colab
+T4 **Run all**, the authorized 24-image private evaluation, provider-side
+credential rotation, and the private GitHub push are never inferred from local
+unit tests.

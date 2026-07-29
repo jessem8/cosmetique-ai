@@ -1,546 +1,712 @@
-import { useState, useEffect } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
-import { generations } from '../api/client.js'
-import PosterPreview from '../components/PosterPreview.jsx'
-import AssetCard from '../components/AssetCard.jsx'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { Link, useParams } from 'react-router-dom'
+import {
+  ArrowLeft,
+  Check,
+  Copy,
+  DownloadSimple,
+  Eye,
+  WarningCircle,
+  X,
+} from '@phosphor-icons/react'
+import { generations, products } from '../api/client.js'
 
-const TONES = [
-  { value: 'luxe', label: '💎 Luxe' },
-  { value: 'naturel', label: '🌿 Naturel' },
-  { value: 'dynamique', label: '⚡ Dynamique' },
-  { value: 'frais', label: '❄️ Frais' },
-  { value: 'scientifique', label: '🔬 Scientifique' },
+const PLATFORMS = [
+  {
+    id: 'instagram',
+    label: 'Instagram',
+    filename: 'instagram.jpg',
+    dimensions: '1080 × 1080',
+  },
+  {
+    id: 'facebook',
+    label: 'Facebook',
+    filename: 'facebook.jpg',
+    dimensions: '1200 × 630',
+  },
+  {
+    id: 'linkedin',
+    label: 'LinkedIn',
+    filename: 'linkedin.jpg',
+    dimensions: '1200 × 627',
+  },
 ]
 
-const FORMATS = ['instagram', 'facebook', 'linkedin']
-
-const FORMAT_CONFIG = {
-  instagram: { emoji: '📸', label: 'Instagram' },
-  facebook: { emoji: '📘', label: 'Facebook' },
-  linkedin: { emoji: '💼', label: 'LinkedIn' },
+const readableCopy = (platformCopy) => {
+  if (!platformCopy?.text) return ''
+  const hashtags = Array.isArray(platformCopy.hashtags)
+    ? platformCopy.hashtags.join(' ')
+    : ''
+  return [platformCopy.text, hashtags].filter(Boolean).join('\n\n')
 }
 
-function formatDate(dateStr) {
-  if (!dateStr) return ''
-  return new Date(dateStr).toLocaleDateString('fr-FR', {
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
+function useCampaignAssets(generation) {
+  const [attempt, setAttempt] = useState(0)
+  const [state, setState] = useState({
+    generationId: null,
+    urls: {},
+    error: null,
+    isLoading: false,
   })
+  const retry = useCallback(() => {
+    setState((current) => ({
+      ...current,
+      error: null,
+      isLoading: true,
+    }))
+    setAttempt((current) => current + 1)
+  }, [])
+
+  useEffect(() => {
+    if (generation?.status !== 'done') return undefined
+    const controller = new AbortController()
+    const ownedUrls = []
+    let active = true
+    const files = [
+      ...PLATFORMS.map((platform) => platform.filename),
+      'cutout.png',
+      'mask.png',
+      'background.jpg',
+    ]
+
+    setState({
+      generationId: generation.id,
+      urls: {},
+      error: null,
+      isLoading: true,
+    })
+
+    Promise.all(
+      files.map(async (filename) => {
+        const response = await generations.getArtifact(
+          generation.id,
+          filename,
+          { signal: controller.signal }
+        )
+        return [filename, response.data]
+      })
+    )
+      .then((entries) => {
+        if (!active) return
+        const urls = Object.fromEntries(
+          entries.map(([filename, blob]) => {
+            const objectUrl = URL.createObjectURL(blob)
+            ownedUrls.push(objectUrl)
+            return [filename, objectUrl]
+          })
+        )
+        setState({
+          generationId: generation.id,
+          urls,
+          error: null,
+          isLoading: false,
+        })
+      })
+      .catch((requestError) => {
+        if (
+          !active ||
+          controller.signal.aborted ||
+          requestError.code === 'REQUEST_CANCELLED'
+        ) {
+          return
+        }
+        controller.abort()
+        setState({
+          generationId: generation.id,
+          urls: {},
+          error: requestError,
+          isLoading: false,
+        })
+      })
+
+    return () => {
+      active = false
+      controller.abort()
+      ownedUrls.forEach((url) => URL.revokeObjectURL(url))
+    }
+  }, [attempt, generation?.id, generation?.status])
+
+  return {
+    urls: state.urls,
+    error: state.error,
+    isLoading:
+      generation?.status === 'done' &&
+      (state.generationId !== generation.id || state.isLoading),
+    retry,
+  }
 }
 
-const CATEGORY_LABELS = {
-  soin_visage: 'Soin Visage',
-  soin_corps: 'Soin Corps',
-  cheveux: 'Cheveux',
-  maquillage: 'Maquillage',
-  solaire: 'Solaire',
-  hygiene: 'Hygiène & Déo',
+function useOriginalImage(generation) {
+  const [attempt, setAttempt] = useState(0)
+  const [state, setState] = useState({
+    generationId: null,
+    url: null,
+    error: null,
+    isLoading: false,
+  })
+  const retry = useCallback(() => {
+    setState((current) => ({
+      ...current,
+      error: null,
+      isLoading: true,
+    }))
+    setAttempt((current) => current + 1)
+  }, [])
+
+  useEffect(() => {
+    if (generation?.status !== 'done') return undefined
+
+    if (!generation.product_id) {
+      setState({
+        generationId: generation.id,
+        url: null,
+        error: new Error(
+          'La campagne terminée ne référence aucune photo originale.'
+        ),
+        isLoading: false,
+      })
+      return undefined
+    }
+
+    const controller = new AbortController()
+    let objectUrl = null
+    setState({
+      generationId: generation.id,
+      url: null,
+      error: null,
+      isLoading: true,
+    })
+
+    products
+      .getImage(generation.product_id, { signal: controller.signal })
+      .then((response) => {
+        if (controller.signal.aborted) return
+        objectUrl = URL.createObjectURL(response.data)
+        setState({
+          generationId: generation.id,
+          url: objectUrl,
+          error: null,
+          isLoading: false,
+        })
+      })
+      .catch((requestError) => {
+        if (
+          controller.signal.aborted ||
+          requestError.code === 'REQUEST_CANCELLED'
+        ) {
+          return
+        }
+        setState({
+          generationId: generation.id,
+          url: null,
+          error: requestError,
+          isLoading: false,
+        })
+      })
+
+    return () => {
+      controller.abort()
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [
+    attempt,
+    generation?.id,
+    generation?.product_id,
+    generation?.status,
+  ])
+
+  return {
+    url: state.url,
+    error: state.error,
+    isLoading:
+      generation?.status === 'done' &&
+      (state.generationId !== generation.id || state.isLoading),
+    retry,
+  }
 }
 
-function ConfirmModal({ title, text, onConfirm, onCancel }) {
-  return (
-    <div className="modal-backdrop" onClick={onCancel}>
-      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-        <h2 className="modal-title">{title}</h2>
-        <p className="modal-text">{text}</p>
-        <div className="modal-actions">
-          <button className="btn btn-ghost" onClick={onCancel}>
-            Annuler
+function EvidenceDrawer({
+  open,
+  onClose,
+  originalUrl,
+  assetUrls,
+  platform,
+  isLoading,
+  error,
+  onRetry,
+}) {
+  const closeRef = useRef(null)
+  const drawerRef = useRef(null)
+
+  useEffect(() => {
+    if (!open) return undefined
+    const previous = document.activeElement
+    const inertTargets = [...document.body.children].filter(
+      (element) => !element.hasAttribute('data-evidence-layer')
+    )
+    const inertState = inertTargets.map((element) => ({
+      element,
+      wasInert: element.hasAttribute('inert'),
+    }))
+    inertTargets.forEach((element) => element.setAttribute('inert', ''))
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    closeRef.current?.focus()
+    const handleKey = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        onClose()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = [
+        ...(drawerRef.current?.querySelectorAll(
+          'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+        ) || []),
+      ]
+      if (focusable.length === 0) {
+        event.preventDefault()
+        return
+      }
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (focusable.length === 1) {
+        event.preventDefault()
+        first.focus()
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', handleKey)
+    return () => {
+      document.removeEventListener('keydown', handleKey)
+      inertState.forEach(({ element, wasInert }) => {
+        if (!wasInert) element.removeAttribute('inert')
+      })
+      document.body.style.overflow = previousOverflow
+      previous?.focus?.()
+    }
+  }, [onClose, open])
+
+  if (!open) return null
+
+  const evidence = [
+    ['Original', originalUrl, 'Photo originale du produit'],
+    ['Masque', assetUrls['mask.png'], 'Masque validé du produit'],
+    ['Découpe', assetUrls['cutout.png'], 'Produit détouré'],
+    ['Décor', assetUrls['background.jpg'], 'Décor généré sans le produit'],
+    [
+      'Composition',
+      assetUrls[platform.filename],
+      `Composition finale ${platform.label}`,
+    ],
+  ]
+
+  return createPortal(
+    <div
+      className="drawer-backdrop"
+      data-evidence-layer=""
+      onMouseDown={onClose}
+    >
+      <div
+        ref={drawerRef}
+        className="evidence-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="evidence-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="evidence-drawer__header">
+          <div>
+            <p className="eyebrow">Traçabilité</p>
+            <h2 id="evidence-title">Preuves de composition</h2>
+          </div>
+          <button
+            ref={closeRef}
+            type="button"
+            className="icon-button"
+            aria-label="Fermer les preuves"
+            onClick={onClose}
+          >
+            <X size={20} aria-hidden="true" />
           </button>
-          <button className="btn btn-warning" onClick={onConfirm}>
-            Confirmer
-          </button>
+        </header>
+        <p className="evidence-drawer__intro">
+          Le produit détouré reste séparé du décor généré jusqu’à la composition
+          finale.
+        </p>
+        {error && (
+          <div className="inline-alert inline-alert--error" role="alert">
+            <div>
+              <strong>Preuves indisponibles</strong>
+              <p>{error.message}</p>
+            </div>
+            <button
+              type="button"
+              className="button button--secondary button--small"
+              onClick={onRetry}
+            >
+              Réessayer les preuves
+            </button>
+          </div>
+        )}
+        <div className="evidence-grid">
+          {evidence.map(([label, url, alt]) => (
+            <figure className="evidence-item" key={label}>
+              <div className="evidence-item__media">
+                {url ? (
+                  <img src={url} alt={alt} />
+                ) : isLoading ? (
+                  <>
+                    <div className="skeleton skeleton--media" />
+                    <span className="visually-hidden">
+                      Chargement de {label.toLowerCase()}
+                    </span>
+                  </>
+                ) : (
+                  <div className="asset-failure asset-failure--compact">
+                    <WarningCircle
+                      size={22}
+                      weight="light"
+                      aria-hidden="true"
+                    />
+                    <span>Fichier indisponible</span>
+                  </div>
+                )}
+              </div>
+              <figcaption>{label}</figcaption>
+            </figure>
+          ))}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 
 function Result() {
   const { id } = useParams()
-  const navigate = useNavigate()
-  const [genData, setGenData] = useState(null)
-  const [assets, setAssets] = useState([])
+  const [generation, setGeneration] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [activeFormat, setActiveFormat] = useState('instagram')
-  const [zipLoading, setZipLoading] = useState(false)
+  const [error, setError] = useState(null)
+  const [activePlatform, setActivePlatform] = useState('instagram')
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [downloading, setDownloading] = useState(false)
+  const tabRefs = useRef([])
+  const assets = useCampaignAssets(generation)
+  const original = useOriginalImage(generation)
+  const retryAssets = assets.retry
+  const retryOriginal = original.retry
 
-  // Text regeneration state
-  const [regenTone, setRegenTone] = useState('luxe')
-  const [regenLoading, setRegenLoading] = useState(false)
-  const [regenError, setRegenError] = useState('')
-
-  // Decor regeneration state
-  const [decorModal, setDecorModal] = useState(false)
-  const [decorLoading, setDecorLoading] = useState(false)
+  const platform =
+    PLATFORMS.find((item) => item.id === activePlatform) || PLATFORMS[0]
+  const platformCopy = generation?.copy?.[activePlatform] || null
+  const copyLanguage = generation?.language === 'en' ? 'en' : 'fr'
+  const evidenceError = original.error || assets.error
+  const evidenceLoading = original.isLoading || assets.isLoading
+  const copyText = useMemo(
+    () => readableCopy(platformCopy),
+    [platformCopy]
+  )
+  const retryEvidence = useCallback(() => {
+    retryOriginal()
+    retryAssets()
+  }, [retryAssets, retryOriginal])
 
   useEffect(() => {
-    loadResult()
+    const controller = new AbortController()
+    generations
+      .get(id, { signal: controller.signal })
+      .then((response) => setGeneration(response.data))
+      .catch((requestError) => {
+        if (requestError.code !== 'REQUEST_CANCELLED') setError(requestError)
+      })
+      .finally(() => setLoading(false))
+    return () => controller.abort()
   }, [id])
 
-  const loadResult = async () => {
-    setLoading(true)
-    setError('')
+  const selectPlatformByKey = (event, index) => {
+    const direction = {
+      ArrowRight: 1,
+      ArrowDown: 1,
+      ArrowLeft: -1,
+      ArrowUp: -1,
+    }[event.key]
+    if (!direction) return
+    event.preventDefault()
+    const next = (index + direction + PLATFORMS.length) % PLATFORMS.length
+    setActivePlatform(PLATFORMS[next].id)
+    tabRefs.current[next]?.focus()
+  }
+
+  const copyCampaign = async () => {
+    if (!copyText) return
     try {
-      const [genRes, assetsRes] = await Promise.all([
-        generations.get(id),
-        generations.getAssets(id),
-      ])
-      setGenData(genRes.data)
-      const assetList = assetsRes.data
-      setAssets(Array.isArray(assetList) ? assetList : assetList?.assets || [])
-    } catch (err) {
-      setError(
-        err.response?.data?.detail ||
-          err.message ||
-          'Impossible de charger les résultats.'
-      )
+      await navigator.clipboard.writeText(copyText)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1800)
+    } catch {
+      setError(new Error('Le texte n’a pas pu être copié.'))
+    }
+  }
+
+  const downloadBundle = async () => {
+    setDownloading(true)
+    setError(null)
+    try {
+      const response = await generations.getBundle(id)
+      const url = URL.createObjectURL(response.data)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `cosmetique-ai-${id}.zip`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+    } catch (requestError) {
+      setError(requestError)
     } finally {
-      setLoading(false)
+      setDownloading(false)
     }
   }
-
-  const handleRegenerateText = async () => {
-    setRegenLoading(true)
-    setRegenError('')
-    try {
-      const res = await generations.regenerateText(id, regenTone)
-      // Update marketing text in place
-      setGenData((prev) => ({
-        ...prev,
-        marketing_text: res.data.marketing_text || res.data,
-        marketing_content: res.data.marketing_content || prev?.marketing_content,
-      }))
-    } catch (err) {
-      setRegenError(
-        err.response?.data?.detail ||
-          err.message ||
-          'Impossible de régénérer le texte.'
-      )
-    } finally {
-      setRegenLoading(false)
-    }
-  }
-
-  const handleRegenerateDecor = async () => {
-    setDecorModal(false)
-    setDecorLoading(true)
-    try {
-      const res = await generations.regenerateDecor(id)
-      const newGenId = res.data.generation_id || res.data.id || id
-      navigate(`/generations/${newGenId}`)
-    } catch (err) {
-      setDecorLoading(false)
-      alert(
-        err.response?.data?.detail ||
-          err.message ||
-          'Impossible de régénérer le décor.'
-      )
-    }
-  }
-
-  const getAssetByFormat = (format) =>
-    assets.find(
-      (a) =>
-        a.format === format ||
-        (a.format || '').toLowerCase() === format.toLowerCase()
-    )
-
-  const downloadBlob = (blob, filename) => {
-    const url = window.URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    window.URL.revokeObjectURL(url)
-  }
-
-  const downloadAll = async () => {
-    setZipLoading(true)
-    try {
-      const res = await generations.downloadZip(id)
-      downloadBlob(res.data, `affiches_${id}.zip`)
-    } catch (err) {
-      alert(
-        err.response?.data?.detail ||
-          err.message ||
-          'Impossible de telecharger les affiches.'
-      )
-    } finally {
-      setZipLoading(false)
-    }
-  }
-
-  // Extract marketing content
-  const marketing =
-    genData?.marketing_text ||
-    genData?.marketing_content ||
-    genData?.content ||
-    null
-  const marketingTitle = marketing?.titre || marketing?.title
-  const marketingSubtitle = marketing?.sous_titre || marketing?.subtitle
-
-  const product = genData?.product || {}
-  const productName =
-    genData?.product_name || product.name || 'Produit cosmétique'
-  const brand = genData?.brand || product.brand || ''
-  const category = genData?.category || product.category || ''
 
   if (loading) {
     return (
-      <div className="page-container">
-        <div className="page-content" style={{ textAlign: 'center', paddingTop: '80px' }}>
-          <div
-            style={{
-              width: '48px',
-              height: '48px',
-              border: '3px solid rgba(212,160,85,0.2)',
-              borderTopColor: 'var(--gold)',
-              borderRadius: '50%',
-              animation: 'spin 0.8s linear infinite',
-              margin: '0 auto 20px',
-            }}
-          />
-          <p style={{ color: 'var(--text-secondary)' }}>
-            Chargement des résultats...
-          </p>
+      <div className="workspace-page workspace-page--wide">
+        <div className="result-layout">
+          <div className="skeleton skeleton--poster" />
+          <div className="skeleton skeleton--timeline" />
         </div>
       </div>
     )
   }
 
-  if (error) {
+  if (error && !generation) {
     return (
-      <div className="page-container">
-        <div className="page-content" style={{ textAlign: 'center', paddingTop: '60px' }}>
-          <div style={{ fontSize: '3rem', marginBottom: '16px' }}>⚠️</div>
-          <p style={{ color: 'var(--error)', marginBottom: '20px' }}>
-            {error}
-          </p>
-          <button className="btn btn-primary" onClick={() => navigate('/dashboard')}>
-            ← Retour au dashboard
-          </button>
-        </div>
+      <div className="workspace-page">
+        <section className="empty-state empty-state--error">
+          <h1>Résultat indisponible</h1>
+          <p>{error.message}</p>
+          <Link className="button button--primary" to="/dashboard">
+            Retour à l’historique
+          </Link>
+        </section>
+      </div>
+    )
+  }
+
+  if (generation?.status !== 'done') {
+    return (
+      <div className="workspace-page">
+        <section className="empty-state">
+          <h1>La campagne n’est pas terminée.</h1>
+          <p>Le résultat s’ouvre uniquement après validation du dossier complet.</p>
+          <Link className="button button--primary" to={`/generations/${id}`}>
+            Voir l’état de la campagne
+          </Link>
+        </section>
       </div>
     )
   }
 
   return (
-    <div className="page-container">
-      <div className="page-content animate-enter">
-        {/* ---- HEADER ---- */}
-        <div className="result-header">
-          <div>
-            <div className="result-meta" style={{ marginBottom: '10px' }}>
-              <button
-                className="btn btn-ghost btn-sm"
-                onClick={() => navigate('/dashboard')}
-                style={{ padding: '4px 8px' }}
-              >
-                ← Dashboard
-              </button>
-              {category && (
-                <span className="badge badge-category">
-                  {CATEGORY_LABELS[category] || category}
-                </span>
-              )}
-              <span className="badge badge-done">✓ Généré</span>
-            </div>
-            <h1 className="result-title">{productName}</h1>
-            {brand && (
-              <p style={{ color: 'var(--text-secondary)', marginTop: '4px' }}>
-                par {brand}
-              </p>
-            )}
-            <div className="result-meta" style={{ marginTop: '10px' }}>
-              {genData?.created_at && (
-                <span className="result-meta-item">
-                  <span>🕐</span>
-                  Généré le {formatDate(genData.created_at)}
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Download all */}
-          <div className="download-section">
-            <button
-              className="btn btn-primary"
-              onClick={downloadAll}
-              disabled={assets.length === 0 || zipLoading}
-            >
-              <span>⬇️</span>
-              <span>Télécharger tout</span>
-            </button>
-          </div>
+    <div className="workspace-page workspace-page--wide">
+      <header className="result-heading">
+        <div>
+          <Link className="text-link" to="/dashboard">
+            <ArrowLeft size={16} aria-hidden="true" />
+            Retour à l’historique
+          </Link>
+          <p className="eyebrow">Campagne terminée</p>
+          <h1>Trois formats. Une même direction.</h1>
         </div>
-
-        <div className="section-divider" />
-
-        {/* ---- POSTER PREVIEWS ---- */}
-        <section style={{ marginBottom: '40px' }}>
-          <h2
-            style={{
-              fontFamily: 'var(--font-heading)',
-              fontSize: '1.2rem',
-              fontWeight: 700,
-              marginBottom: '16px',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-            }}
+        <div className="result-heading__actions">
+          <button
+            type="button"
+            className="button button--secondary"
+            onClick={() => setDrawerOpen(true)}
           >
-            🖼️ Affiches générées
-          </h2>
+            <Eye size={18} aria-hidden="true" />
+            Voir les preuves
+          </button>
+          <button
+            type="button"
+            className="button button--primary"
+            disabled={downloading}
+            onClick={downloadBundle}
+          >
+            <DownloadSimple size={18} aria-hidden="true" />
+            {downloading
+              ? 'Préparation du dossier'
+              : 'Télécharger le dossier ZIP'}
+          </button>
+        </div>
+      </header>
 
-          {/* Format tabs */}
-          <div className="format-tabs">
-            {FORMATS.map((fmt) => (
-              <button
-                key={fmt}
-                className={`format-tab${activeFormat === fmt ? ' active' : ''}`}
-                onClick={() => setActiveFormat(fmt)}
-              >
-                {FORMAT_CONFIG[fmt].emoji} {FORMAT_CONFIG[fmt].label}
-              </button>
-            ))}
+      {error && (
+        <div className="inline-alert inline-alert--error" role="alert">
+          <p>{error.message}</p>
+        </div>
+      )}
+
+      {evidenceError && (
+        <div className="inline-alert inline-alert--error" role="alert">
+          <div>
+            <strong>Preuves indisponibles</strong>
+            <p>{evidenceError.message}</p>
           </div>
+          <button
+            type="button"
+            className="button button--secondary button--small"
+            onClick={retryEvidence}
+          >
+            Réessayer les preuves
+          </button>
+        </div>
+      )}
 
-          {/* All 3 posters */}
-          <div className="posters-grid">
-            {FORMATS.map((fmt) => {
-              const asset = getAssetByFormat(fmt)
-              return (
-                <PosterPreview
-                  key={fmt}
-                  url={asset?.url}
-                  format={fmt}
-                  label={FORMAT_CONFIG[fmt].label}
-                  isActive={activeFormat === fmt}
-                />
-              )
-            })}
-          </div>
-        </section>
-
-        {/* ---- ASSET CARDS ---- */}
-        {assets.length > 0 && (
-          <section style={{ marginBottom: '40px' }}>
-            <h2
-              style={{
-                fontFamily: 'var(--font-heading)',
-                fontSize: '1.2rem',
-                fontWeight: 700,
-                marginBottom: '16px',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '8px',
-              }}
-            >
-              📦 Fichiers exportés
-            </h2>
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
-                gap: '16px',
-              }}
-            >
-              {assets.map((asset, idx) => (
-                <AssetCard key={asset.id || idx} asset={asset} />
+      <div className="result-layout">
+        <section className="platform-studio" aria-labelledby="visual-title">
+          <div className="platform-studio__heading">
+            <div>
+              <h2 id="visual-title">Visuels de campagne</h2>
+              <span>{platform.dimensions} px</span>
+            </div>
+            <div className="platform-tabs" role="tablist" aria-label="Plateformes">
+              {PLATFORMS.map((item, index) => (
+                <button
+                  key={item.id}
+                  ref={(element) => {
+                    tabRefs.current[index] = element
+                  }}
+                  type="button"
+                  role="tab"
+                  id={`tab-${item.id}`}
+                  aria-controls={`panel-${item.id}`}
+                  aria-selected={activePlatform === item.id}
+                  tabIndex={activePlatform === item.id ? 0 : -1}
+                  onClick={() => setActivePlatform(item.id)}
+                  onKeyDown={(event) => selectPlatformByKey(event, index)}
+                >
+                  {item.label}
+                </button>
               ))}
             </div>
-          </section>
-        )}
-
-        <div className="section-divider" />
-
-        {/* ---- MARKETING TEXT ---- */}
-        <section style={{ marginBottom: '40px' }}>
-          <h2
-            style={{
-              fontFamily: 'var(--font-heading)',
-              fontSize: '1.2rem',
-              fontWeight: 700,
-              marginBottom: '16px',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-            }}
+          </div>
+          <div
+            id={`panel-${platform.id}`}
+            className="platform-viewer"
+            role="tabpanel"
+            aria-labelledby={`tab-${platform.id}`}
+            tabIndex="0"
           >
-            ✍️ Texte marketing
-          </h2>
-
-          <div className="glass-card marketing-card">
-            <div className="marketing-card-header">
-              <div>
-                <div className="marketing-card-title-label">Contenu généré par IA</div>
-              </div>
-              {/* Regenerate text controls */}
-              <div className="regenerate-section">
-                <select
-                  className="select-field"
-                  value={regenTone}
-                  onChange={(e) => setRegenTone(e.target.value)}
-                  style={{ width: 'auto', fontSize: '0.82rem', padding: '7px 36px 7px 12px' }}
-                  disabled={regenLoading}
-                >
-                  {TONES.map((t) => (
-                    <option key={t.value} value={t.value}>
-                      {t.label}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  className={`btn btn-secondary btn-sm${regenLoading ? ' btn-loading' : ''}`}
-                  onClick={handleRegenerateText}
-                  disabled={regenLoading}
-                >
-                  <span>{regenLoading ? '' : '🔄 Régénérer le texte'}</span>
-                </button>
-              </div>
-            </div>
-
-            {regenError && (
-              <div
-                className="auth-error"
-                style={{ marginBottom: '16px', fontSize: '0.82rem' }}
-              >
-                <span>⚠️</span> {regenError}
-              </div>
-            )}
-
-            {/* Marketing content display */}
-            {marketing ? (
-              <div style={{ position: 'relative' }}>
-                {regenLoading && (
-                  <div
-                    style={{
-                      position: 'absolute',
-                      inset: 0,
-                      background: 'rgba(8,8,15,0.7)',
-                      backdropFilter: 'blur(4px)',
-                      borderRadius: 'var(--radius-md)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      zIndex: 10,
-                      gap: '12px',
-                      color: 'var(--gold)',
-                      fontWeight: 600,
-                    }}
-                  >
-                    <span className="inline-spinner" />
-                    Régénération en cours...
-                  </div>
-                )}
-
-                {marketingTitle && (
-                  <div className="marketing-title">{marketingTitle}</div>
-                )}
-                {marketingSubtitle && (
-                  <div className="marketing-subtitle">{marketingSubtitle}</div>
-                )}
-                {marketing.bullets && marketing.bullets.length > 0 && (
-                  <div className="marketing-bullets">
-                    {marketing.bullets.map((bullet, i) => (
-                      <div key={i} className="marketing-bullet">
-                        <div className="marketing-bullet-dot" />
-                        <span>{bullet}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {marketing.cta && (
-                  <div>
-                    <span className="marketing-cta-preview">{marketing.cta}</span>
-                  </div>
-                )}
-
-                {/* If marketing is a raw string */}
-                {typeof marketing === 'string' && (
-                  <p
-                    style={{
-                      color: 'var(--text-secondary)',
-                      fontSize: '0.9rem',
-                      lineHeight: 1.7,
-                      whiteSpace: 'pre-line',
-                    }}
-                  >
-                    {marketing}
-                  </p>
-                )}
+            {assets.urls[platform.filename] ? (
+              <img
+                className="platform-viewer__image"
+                src={assets.urls[platform.filename]}
+                alt={`Visuel ${platform.label} de la campagne`}
+              />
+            ) : assets.isLoading ? (
+              <div role="status" aria-label={`Chargement du visuel ${platform.label}`}>
+                <div className="skeleton skeleton--poster" />
               </div>
             ) : (
-              <div
-                style={{
-                  color: 'var(--text-muted)',
-                  fontStyle: 'italic',
-                  fontSize: '0.88rem',
-                  textAlign: 'center',
-                  padding: '20px',
-                }}
-              >
-                Aucun texte marketing disponible pour le moment.
+              <div className="asset-failure">
+                <WarningCircle size={30} weight="light" aria-hidden="true" />
+                <div>
+                  <h3>Visuel {platform.label} indisponible</h3>
+                  <p>
+                    Aucun fichier partiel n’est affiché comme résultat terminé.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="button button--secondary"
+                  onClick={retryEvidence}
+                >
+                  Réessayer les preuves
+                </button>
               </div>
             )}
           </div>
         </section>
 
-        <div className="section-divider" />
-
-        {/* ---- DECOR REGENERATION ---- */}
-        <section style={{ marginBottom: '40px' }}>
-          <h2
-            style={{
-              fontFamily: 'var(--font-heading)',
-              fontSize: '1.2rem',
-              fontWeight: 700,
-              marginBottom: '16px',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-            }}
-          >
-            🎨 Décor IA
-          </h2>
-
-          <div className="glass-card decor-section">
-            <div className="decor-section-info">
-              <div className="decor-section-title">Régénérer le décor</div>
-              <div className="decor-section-sub">
-                Générez un nouveau décor pour votre affiche avec une composition différente.
-                Attention, cette action relancera une nouvelle génération complète.
-              </div>
+        <aside className="copy-panel" aria-labelledby="copy-title">
+          <div className="copy-panel__heading">
+            <div>
+              <p className="eyebrow">
+                {generation.language === 'en' ? 'Texte anglais' : 'Texte français'}
+              </p>
+              <h2 id="copy-title">Texte de campagne</h2>
             </div>
             <button
-              className={`btn btn-warning${decorLoading ? ' btn-loading' : ''}`}
-              onClick={() => setDecorModal(true)}
-              disabled={decorLoading}
+              type="button"
+              className="button button--quiet button--small"
+              disabled={!copyText}
+              onClick={copyCampaign}
+              aria-label={`Copier le texte ${platform.label}`}
             >
-              <span>
-                {decorLoading ? '' : '🔄 Régénérer le décor'}
-              </span>
+              {copied ? (
+                <Check size={17} aria-hidden="true" />
+              ) : (
+                <Copy size={17} aria-hidden="true" />
+              )}
+              {copied ? 'Copié' : 'Copier'}
             </button>
           </div>
-        </section>
-
-        {/* Confirmation modal */}
-        {decorModal && (
-          <ConfirmModal
-            title="🎨 Régénérer le décor ?"
-            text="Cette action va relancer une génération complète avec un nouveau décor. Le processus prendra environ 60 à 90 secondes. Voulez-vous continuer ?"
-            onConfirm={handleRegenerateDecor}
-            onCancel={() => setDecorModal(false)}
-          />
-        )}
+          {platformCopy?.text && (
+            <div className="copy-block">
+              <span>Publication {platform.label}</span>
+              <p lang={copyLanguage}>{platformCopy.text}</p>
+            </div>
+          )}
+          {platformCopy?.hashtags?.length > 0 && (
+            <div className="copy-block">
+              <span>Mots-dièse</span>
+              <p lang={copyLanguage}>{platformCopy.hashtags.join(' ')}</p>
+            </div>
+          )}
+          {platformCopy?.claims?.length > 0 && (
+            <div className="copy-block">
+              <span>Références vérifiées</span>
+              <ul className="copy-claims">
+                {platformCopy.claims.map((claim, index) => (
+                  <li key={`${claim.evidence_id}-${index}`}>
+                    <span lang={copyLanguage}>{claim.rendered_text}</span>
+                    <code>{claim.evidence_id}</code>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {!copyText && (
+            <p className="copy-panel__empty">
+              Aucun texte validé n’est disponible dans ce dossier.
+            </p>
+          )}
+          <div className="copy-panel__proof">
+            <Check size={17} aria-hidden="true" />
+            <p>Texte contraint par les informations vérifiées du brief.</p>
+          </div>
+        </aside>
       </div>
+
+      <EvidenceDrawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        originalUrl={original.url}
+        assetUrls={assets.urls}
+        platform={platform}
+        isLoading={evidenceLoading}
+        error={evidenceError}
+        onRetry={retryEvidence}
+      />
     </div>
   )
 }

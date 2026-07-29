@@ -1,583 +1,535 @@
-import { useState, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { products, generations } from '../api/client.js'
+import {
+  ArrowRight,
+  ImageSquare,
+  ShieldCheck,
+  UploadSimple,
+  X,
+} from '@phosphor-icons/react'
+import { generations, products } from '../api/client.js'
+import { createIdempotencyKey } from '../utils/idempotency.js'
 
-const STEPS = [
-  { id: 1, label: "Image produit" },
-  { id: 2, label: "Informations" },
-  { id: 3, label: "Confirmation" },
-]
+const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'image/webp']
+const MAX_FILE_SIZE = 10 * 1024 * 1024
+const MAX_SEED = 4_294_967_295
 
 const CATEGORIES = [
-  { value: 'soin_visage', label: 'Soin Visage' },
-  { value: 'soin_corps', label: 'Soin Corps' },
-  { value: 'cheveux', label: 'Cheveux' },
-  { value: 'maquillage', label: 'Maquillage' },
-  { value: 'solaire', label: 'Solaire' },
-  { value: 'hygiene', label: 'Hygiène & Déo' },
+  ['soin_visage', 'Soin du visage'],
+  ['soin_corps', 'Soin du corps'],
+  ['cheveux', 'Soin des cheveux'],
+  ['maquillage', 'Maquillage'],
+  ['solaire', 'Protection solaire'],
+  ['hygiene', 'Hygiène'],
 ]
 
-const TONES = [
-  { value: 'luxe', label: '💎 Luxe' },
-  { value: 'naturel', label: '🌿 Naturel' },
-  { value: 'dynamique', label: '⚡ Dynamique' },
-  { value: 'frais', label: '❄️ Frais' },
-  { value: 'scientifique', label: '🔬 Scientifique' },
-]
+const initialForm = {
+  name: '',
+  brand: '',
+  category: 'soin_visage',
+  language: 'fr',
+  seed: '42',
+  audience: '',
+  benefits: '',
+  ingredients: '',
+  verifiedClaims: '',
+  cta: '',
+  creativeDirection: '',
+}
 
-const TEMPLATES = [
-  { value: 'classique', label: '🎭 Classique' },
-  { value: 'minimaliste', label: '◻️ Minimaliste' },
-  { value: 'bold', label: '🔥 Bold' },
-]
+const lines = (value) =>
+  value
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
 
-function StepIndicator({ current }) {
-  return (
-    <div className="upload-steps-indicator">
-      {STEPS.map((step, idx) => (
-        <div className="upload-step-item" key={step.id}>
-          <div className="upload-step-wrapper">
-            <div
-              className={`upload-step-dot${
-                current === step.id
-                  ? ' active'
-                  : current > step.id
-                  ? ' completed'
-                  : ''
-              }`}
-            >
-              {current > step.id ? '✓' : step.id}
-            </div>
-            <span className="upload-step-label">{step.label}</span>
-          </div>
-          {idx < STEPS.length - 1 && (
-            <div
-              className={`upload-step-connector${
-                current > step.id ? ' completed' : ''
-              }`}
-            />
-          )}
-        </div>
-      ))}
-    </div>
-  )
+const optional = (value) => {
+  const trimmed = value.trim()
+  return trimmed || undefined
 }
 
 function Upload() {
   const navigate = useNavigate()
-  const fileInputRef = useRef(null)
-  const [step, setStep] = useState(1)
-  const [dragging, setDragging] = useState(false)
-  const [imageFile, setImageFile] = useState(null)
-  const [imagePreview, setImagePreview] = useState(null)
-  const [fileError, setFileError] = useState('')
-  const [form, setForm] = useState({
-    name: '',
-    brand: '',
-    category: 'soin_visage',
-    tone: 'luxe',
-    template: 'classique',
-  })
-  const [formErrors, setFormErrors] = useState({})
+  const fileRef = useRef(null)
+  const uploadedProductRef = useRef(null)
+  const idempotencyRef = useRef({ fingerprint: null, key: null })
+  const [image, setImage] = useState(null)
+  const [imageRevision, setImageRevision] = useState(0)
+  const [preview, setPreview] = useState(null)
+  const [form, setForm] = useState(initialForm)
+  const [errors, setErrors] = useState({})
+  const [submitError, setSubmitError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
-  const [submitError, setSubmitError] = useState('')
+  const [dragging, setDragging] = useState(false)
 
-  // --- Step 1: Image handling ---
-  const ACCEPTED = ['image/jpeg', 'image/png', 'image/webp']
-  const MAX_SIZE = 10 * 1024 * 1024 // 10 MB
+  useEffect(() => {
+    if (!image) {
+      setPreview(null)
+      return undefined
+    }
+    const objectUrl = URL.createObjectURL(image)
+    setPreview(objectUrl)
+    return () => URL.revokeObjectURL(objectUrl)
+  }, [image])
 
-  const handleFile = (file) => {
-    setFileError('')
+  const campaignPayload = useMemo(
+    () => ({
+      language: form.language,
+      seed: Number(form.seed),
+      ...(optional(form.audience) ? { audience: optional(form.audience) } : {}),
+      ...(lines(form.benefits).length
+        ? { benefits: lines(form.benefits) }
+        : {}),
+      ...(lines(form.ingredients).length
+        ? { ingredients: lines(form.ingredients) }
+        : {}),
+      ...(lines(form.verifiedClaims).length
+        ? { verified_claims: lines(form.verifiedClaims) }
+        : {}),
+      ...(optional(form.cta) ? { cta: optional(form.cta) } : {}),
+      ...(optional(form.creativeDirection)
+        ? { creative_direction: optional(form.creativeDirection) }
+        : {}),
+    }),
+    [form]
+  )
+  const productFingerprint = useMemo(
+    () =>
+      JSON.stringify({
+        imageRevision,
+        name: form.name.trim(),
+        brand: form.brand.trim(),
+        category: form.category,
+      }),
+    [form.brand, form.category, form.name, imageRevision]
+  )
+  const generationFingerprint = useMemo(
+    () => JSON.stringify({ productFingerprint, campaignPayload }),
+    [campaignPayload, productFingerprint]
+  )
+  const evidenceLanguage = form.language === 'en' ? 'anglais' : 'français'
+
+  const updateField = (event) => {
+    const { name, value } = event.target
+    setForm((current) => ({ ...current, [name]: value }))
+    setErrors((current) => ({ ...current, [name]: null }))
+  }
+
+  const acceptFile = (file) => {
+    setErrors((current) => ({ ...current, image: null }))
     if (!file) return
-    if (!ACCEPTED.includes(file.type)) {
-      setFileError('Format non supporté. Utilisez JPG, PNG ou WebP.')
+    setImageRevision((revision) => revision + 1)
+    if (!ACCEPTED_TYPES.includes(file.type)) {
+      setImage(null)
+      setErrors((current) => ({
+        ...current,
+        image: 'Utilisez une image JPG, PNG ou WebP.',
+      }))
       return
     }
-    if (file.size > MAX_SIZE) {
-      setFileError('Le fichier dépasse 10 Mo.')
+    if (file.size > MAX_FILE_SIZE) {
+      setImage(null)
+      setErrors((current) => ({
+        ...current,
+        image: 'La photo ne doit pas dépasser 10 Mo.',
+      }))
       return
     }
-    setImageFile(file)
-    const reader = new FileReader()
-    reader.onload = (e) => setImagePreview(e.target.result)
-    reader.readAsDataURL(file)
+    setImage(file)
   }
 
-  const handleDrop = (e) => {
-    e.preventDefault()
-    setDragging(false)
-    const file = e.dataTransfer.files?.[0]
-    if (file) handleFile(file)
-  }
-
-  const handleDragOver = (e) => {
-    e.preventDefault()
-    setDragging(true)
-  }
-
-  const handleDragLeave = () => setDragging(false)
-
-  const handleFileInput = (e) => {
-    handleFile(e.target.files?.[0])
-  }
-
-  // --- Step 2: Form handling ---
-  const handleFormChange = (e) => {
-    const { name, value } = e.target
-    setForm((prev) => ({ ...prev, [name]: value }))
-    setFormErrors((prev) => ({ ...prev, [name]: '' }))
-  }
-
-  const validateForm = () => {
-    const errors = {}
-    if (!form.name.trim()) errors.name = 'Le nom du produit est requis.'
-    return errors
-  }
-
-  // --- Step navigation ---
-  const goToStep2 = () => {
-    if (!imageFile) {
-      setFileError('Veuillez ajouter une image produit.')
-      return
+  const validate = () => {
+    const next = {}
+    if (!image) next.image = 'Ajoutez une photo du produit.'
+    if (!form.name.trim()) next.name = 'Le nom du produit est requis.'
+    const seed = Number(form.seed)
+    if (!Number.isInteger(seed) || seed < 0 || seed > MAX_SEED) {
+      next.seed = 'Utilisez un nombre entier entre 0 et 4294967295.'
     }
-    setStep(2)
-    window.scrollTo({ top: 0, behavior: 'smooth' })
+    setErrors(next)
+    return Object.keys(next).length === 0
   }
 
-  const goToStep3 = () => {
-    const errors = validateForm()
-    if (Object.keys(errors).length) {
-      setFormErrors(errors)
-      return
+  const launchGeneration = async (
+    productId,
+    payload = campaignPayload,
+    fingerprint = generationFingerprint
+  ) => {
+    if (idempotencyRef.current.fingerprint !== fingerprint) {
+      idempotencyRef.current = {
+        fingerprint,
+        key: createIdempotencyKey(),
+      }
     }
-    setStep(3)
-    window.scrollTo({ top: 0, behavior: 'smooth' })
+    const response = await generations.create(productId, payload, {
+      idempotencyKey: idempotencyRef.current.key,
+    })
+    const generationId = response.data.id || response.data.generation_id
+    navigate(`/generations/${generationId}`)
   }
 
-  // --- Final submit ---
-  const handleSubmit = async () => {
+  const submit = async (event) => {
+    event?.preventDefault()
+    if (!validate()) return
     setSubmitting(true)
-    setSubmitError('')
+    setSubmitError(null)
+
     try {
-      // 1. Create product with multipart form data
-      const formData = new FormData()
-      formData.append('image', imageFile)
-      formData.append('name', form.name)
-      if (form.brand) formData.append('brand', form.brand)
-      formData.append('category', form.category)
+      const submittedProductFingerprint = productFingerprint
+      const submittedGenerationFingerprint = generationFingerprint
+      const submittedPayload = campaignPayload
+      let uploadedProduct = uploadedProductRef.current
+      if (
+        !uploadedProduct ||
+        uploadedProduct.fingerprint !== submittedProductFingerprint
+      ) {
+        const body = new FormData()
+        body.set('image', image)
+        body.set('name', form.name.trim())
+        body.set('category', form.category)
+        if (form.brand.trim()) body.set('brand', form.brand.trim())
+        const response = await products.create(body)
+        uploadedProduct = {
+          id: response.data.id || response.data.product_id,
+          fingerprint: submittedProductFingerprint,
+        }
+        uploadedProductRef.current = uploadedProduct
+      }
+      await launchGeneration(
+        uploadedProduct.id,
+        submittedPayload,
+        submittedGenerationFingerprint
+      )
+    } catch (error) {
+      setSubmitError(error)
+    } finally {
+      setSubmitting(false)
+    }
+  }
 
-      const productRes = await products.create(formData)
-      const productData = productRes.data
-      const productId = productData.id || productData.product_id
-
-      // 2. Create generation
-      const genRes = await generations.create(productId, {
-        tone: form.tone,
-        template: form.template,
-      })
-      const genData = genRes.data
-      const genId = genData.id || genData.generation_id
-
-      // 3. Navigate to polling page
-      navigate(`/generations/${genId}`)
-    } catch (err) {
-      const msg =
-        err.response?.data?.detail ||
-        err.response?.data?.message ||
-        err.message ||
-        "Une erreur est survenue lors du lancement de la génération."
-      setSubmitError(msg)
+  const retryLaunch = async () => {
+    const uploadedProduct = uploadedProductRef.current
+    if (!uploadedProduct || uploadedProduct.fingerprint !== productFingerprint) {
+      return
+    }
+    setSubmitting(true)
+    setSubmitError(null)
+    try {
+      await launchGeneration(uploadedProduct.id)
+    } catch (error) {
+      setSubmitError(error)
     } finally {
       setSubmitting(false)
     }
   }
 
   return (
-    <div className="page-container">
-      <div className="page-content animate-enter">
-        <div className="upload-container">
-          {/* Page title */}
-          <div style={{ textAlign: 'center', marginBottom: '32px' }}>
-            <h1 className="section-title">
-              Nouveau <span>Produit</span>
-            </h1>
-            <p className="section-subtitle">
-              Importez votre photo et configurez votre affiche en 3 étapes
-            </p>
+    <div className="workspace-page workspace-page--wide">
+      <header className="page-heading page-heading--editorial">
+        <div>
+          <p className="eyebrow">Nouvelle campagne</p>
+          <h1>Donnez au produit toute la scène.</h1>
+        </div>
+        <p>
+          Le produit reste intact. Les décors, la composition et le texte sont
+          produits à partir de vos informations vérifiées.
+        </p>
+      </header>
+
+      <form className="campaign-form" onSubmit={submit} noValidate>
+        <section className="studio-panel studio-panel--upload">
+          <div className="studio-panel__heading">
+            <ImageSquare size={24} weight="light" aria-hidden="true" />
+            <div>
+              <h2>Photo du produit</h2>
+              <p>Un produit net, entier et bien éclairé donne le meilleur masque.</p>
+            </div>
           </div>
 
-          {/* Step indicator */}
-          <StepIndicator current={step} />
-
-          {/* ==================== STEP 1 ==================== */}
-          {step === 1 && (
-            <div className="glass-card" style={{ padding: '32px' }}>
-              <h2 className="upload-section-header">
-                📷 Image du produit
-              </h2>
-
-              {!imagePreview ? (
-                <div
-                  className={`dropzone${dragging ? ' dragging' : ''}`}
-                  onDrop={handleDrop}
-                  onDragOver={handleDragOver}
-                  onDragLeave={handleDragLeave}
-                  onClick={() => fileInputRef.current?.click()}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) =>
-                    e.key === 'Enter' && fileInputRef.current?.click()
-                  }
-                >
-                  <span className="dropzone-icon">📤</span>
-                  <div className="dropzone-title">
-                    Glissez votre image ici
-                  </div>
-                  <div className="dropzone-subtitle">
-                    ou cliquez pour parcourir vos fichiers
-                  </div>
-                  <div className="dropzone-formats">
-                    Formats acceptés : JPG, PNG, WebP — Max 10 Mo
-                  </div>
-                </div>
-              ) : (
-                <div>
-                  <div className="dropzone-preview">
-                    <img
-                      src={imagePreview}
-                      alt="Aperçu produit"
-                      style={{ maxHeight: '320px', objectFit: 'contain', width: '100%' }}
-                    />
-                    <div className="dropzone-preview-overlay">
-                      <button
-                        className="btn btn-secondary"
-                        onClick={() => fileInputRef.current?.click()}
-                      >
-                        🔄 Changer l'image
-                      </button>
-                    </div>
-                  </div>
-                  <div
-                    style={{
-                      marginTop: '12px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '10px',
-                      color: 'var(--success)',
-                      fontSize: '0.85rem',
-                    }}
-                  >
-                    <span>✅</span>
-                    <span>
-                      {imageFile.name} ({(imageFile.size / 1024 / 1024).toFixed(1)} Mo)
-                    </span>
-                    <button
-                      className="btn btn-ghost btn-sm"
-                      onClick={() => {
-                        setImageFile(null)
-                        setImagePreview(null)
-                      }}
-                      style={{ marginLeft: 'auto', color: 'var(--error)' }}
-                    >
-                      ✕ Supprimer
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/jpeg,image/png,image/webp"
-                style={{ display: 'none' }}
-                onChange={handleFileInput}
-              />
-
-              {fileError && (
-                <div className="form-error" style={{ marginTop: '12px' }}>
-                  ⚠️ {fileError}
-                </div>
-              )}
-
-              <div className="upload-nav">
+          <div
+            className="drop-studio"
+            data-dragging={dragging}
+            onDragEnter={(event) => {
+              event.preventDefault()
+              setDragging(true)
+            }}
+            onDragOver={(event) => event.preventDefault()}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(event) => {
+              event.preventDefault()
+              setDragging(false)
+              acceptFile(event.dataTransfer.files?.[0])
+            }}
+          >
+            {preview ? (
+              <div className="drop-studio__preview">
+                <img src={preview} alt="Aperçu du produit importé" />
                 <button
-                  className="btn btn-ghost"
-                  onClick={() => navigate('/dashboard')}
+                  type="button"
+                  className="icon-button drop-studio__remove"
+                  aria-label="Retirer la photo"
+                  onClick={() => {
+                    setImage(null)
+                    setImageRevision((revision) => revision + 1)
+                    if (fileRef.current) fileRef.current.value = ''
+                  }}
                 >
-                  ← Annuler
+                  <X size={18} aria-hidden="true" />
                 </button>
-                <button className="btn btn-primary" onClick={goToStep2}>
-                  <span>Continuer →</span>
-                </button>
+              </div>
+            ) : (
+              <div className="drop-studio__empty">
+                <UploadSimple size={32} weight="light" aria-hidden="true" />
+                <strong>Déposez votre photo ici</strong>
+                <span>JPG, PNG ou WebP. 10 Mo maximum.</span>
+              </div>
+            )}
+            <label className="button button--secondary" htmlFor="product-image">
+              {image ? 'Changer la photo' : 'Choisir une photo'}
+            </label>
+            <input
+              ref={fileRef}
+              id="product-image"
+              className="visually-hidden"
+              type="file"
+              aria-label="Photo du produit"
+              accept={ACCEPTED_TYPES.join(',')}
+              aria-describedby={errors.image ? 'product-image-error' : undefined}
+              aria-invalid={Boolean(errors.image)}
+              onChange={(event) => acceptFile(event.target.files?.[0])}
+            />
+          </div>
+          {errors.image && (
+            <p id="product-image-error" className="field-error">
+              {errors.image}
+            </p>
+          )}
+        </section>
+
+        <div className="campaign-form__fields">
+          <section className="studio-panel">
+            <div className="studio-panel__heading">
+              <ShieldCheck size={24} weight="light" aria-hidden="true" />
+              <div>
+                <h2>Fiche produit</h2>
+                <p>Ces informations identifient le produit et encadrent le texte.</p>
               </div>
             </div>
-          )}
+            <p
+              className="language-guidance"
+              id="evidence-language-guidance"
+              role="status"
+            >
+              Saisissez ces éléments en {evidenceLanguage}. Aucune traduction
+              automatique n’est appliquée.
+            </p>
 
-          {/* ==================== STEP 2 ==================== */}
-          {step === 2 && (
-            <div className="glass-card" style={{ padding: '32px' }}>
-              <h2 className="upload-section-header">
-                📝 Informations du produit
-              </h2>
-
-              <div className="upload-form">
-                <div className="upload-grid">
-                  {/* Name */}
-                  <div
-                    className="form-group"
-                    style={{ gridColumn: '1 / -1' }}
-                  >
-                    <label className="form-label" htmlFor="prod-name">
-                      Nom du produit *
-                    </label>
-                    <input
-                      id="prod-name"
-                      name="name"
-                      type="text"
-                      className={`input-field${formErrors.name ? ' error' : ''}`}
-                      placeholder="ex : Sérum Éclat Vitamine C"
-                      value={form.name}
-                      onChange={handleFormChange}
-                    />
-                    {formErrors.name && (
-                      <span className="form-error">{formErrors.name}</span>
-                    )}
-                  </div>
-
-                  {/* Brand */}
-                  <div className="form-group">
-                    <label className="form-label" htmlFor="prod-brand">
-                      Marque (optionnel)
-                    </label>
-                    <input
-                      id="prod-brand"
-                      name="brand"
-                      type="text"
-                      className="input-field"
-                      placeholder="ex : L'Oréal, Lancôme…"
-                      value={form.brand}
-                      onChange={handleFormChange}
-                    />
-                  </div>
-
-                  {/* Category */}
-                  <div className="form-group">
-                    <label className="form-label" htmlFor="prod-category">
-                      Catégorie
-                    </label>
-                    <select
-                      id="prod-category"
-                      name="category"
-                      className="select-field"
-                      value={form.category}
-                      onChange={handleFormChange}
-                    >
-                      {CATEGORIES.map((c) => (
-                        <option key={c.value} value={c.value}>
-                          {c.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Tone */}
-                  <div className="form-group">
-                    <label className="form-label" htmlFor="prod-tone">
-                      Tonalité
-                    </label>
-                    <select
-                      id="prod-tone"
-                      name="tone"
-                      className="select-field"
-                      value={form.tone}
-                      onChange={handleFormChange}
-                    >
-                      {TONES.map((t) => (
-                        <option key={t.value} value={t.value}>
-                          {t.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Template */}
-                  <div
-                    className="form-group"
-                    style={{ gridColumn: '1 / -1' }}
-                  >
-                    <label className="form-label">Template</label>
-                    <div
-                      style={{
-                        display: 'flex',
-                        gap: '10px',
-                        flexWrap: 'wrap',
-                      }}
-                    >
-                      {TEMPLATES.map((t) => (
-                        <label
-                          key={t.value}
-                          style={{
-                            flex: 1,
-                            minWidth: '120px',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            gap: '6px',
-                            padding: '12px',
-                            background:
-                              form.template === t.value
-                                ? 'var(--gold-dim)'
-                                : 'rgba(255,255,255,0.03)',
-                            border: `1px solid ${
-                              form.template === t.value
-                                ? 'rgba(212,160,85,0.4)'
-                                : 'var(--border-subtle)'
-                            }`,
-                            borderRadius: 'var(--radius-md)',
-                            cursor: 'pointer',
-                            transition: 'all 0.2s',
-                            fontSize: '0.9rem',
-                            fontWeight: form.template === t.value ? 600 : 400,
-                            color:
-                              form.template === t.value
-                                ? 'var(--gold-bright)'
-                                : 'var(--text-secondary)',
-                          }}
-                        >
-                          <input
-                            type="radio"
-                            name="template"
-                            value={t.value}
-                            checked={form.template === t.value}
-                            onChange={handleFormChange}
-                            style={{ display: 'none' }}
-                          />
-                          {t.label}
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                </div>
+            <div className="form-grid">
+              <div className="field field--span-2">
+                <label htmlFor="product-name">Nom du produit</label>
+                <input
+                  id="product-name"
+                  name="name"
+                  value={form.name}
+                  onChange={updateField}
+                  required
+                  maxLength={120}
+                  aria-invalid={Boolean(errors.name)}
+                  aria-describedby={errors.name ? 'product-name-error' : undefined}
+                />
+                {errors.name && (
+                  <span id="product-name-error" className="field-error">
+                    {errors.name}
+                  </span>
+                )}
               </div>
-
-              <div className="upload-nav">
-                <button className="btn btn-secondary" onClick={() => setStep(1)}>
-                  ← Retour
-                </button>
-                <button className="btn btn-primary" onClick={goToStep3}>
-                  <span>Continuer →</span>
-                </button>
+              <div className="field">
+                <label htmlFor="product-brand">Marque (optionnel)</label>
+                <input
+                  id="product-brand"
+                  name="brand"
+                  value={form.brand}
+                  onChange={updateField}
+                  maxLength={100}
+                />
               </div>
-            </div>
-          )}
-
-          {/* ==================== STEP 3 ==================== */}
-          {step === 3 && (
-            <div className="glass-card" style={{ padding: '32px' }}>
-              <h2 className="upload-section-header">
-                🚀 Confirmation & Lancement
-              </h2>
-
-              {/* Summary */}
-              <div className="confirm-preview glass-card" style={{ padding: '20px', marginBottom: '24px' }}>
-                <div className="confirm-image">
-                  {imagePreview && (
-                    <img
-                      src={imagePreview}
-                      alt="Produit"
-                      style={{ borderRadius: 'var(--radius-md)' }}
-                    />
-                  )}
-                </div>
-                <div className="confirm-details">
-                  <div className="confirm-row">
-                    <span className="confirm-row-label">Produit</span>
-                    <span className="confirm-row-value">{form.name}</span>
-                  </div>
-                  {form.brand && (
-                    <div className="confirm-row">
-                      <span className="confirm-row-label">Marque</span>
-                      <span className="confirm-row-value">{form.brand}</span>
-                    </div>
-                  )}
-                  <div className="confirm-row">
-                    <span className="confirm-row-label">Catégorie</span>
-                    <span className="confirm-row-value">
-                      {CATEGORIES.find((c) => c.value === form.category)?.label}
-                    </span>
-                  </div>
-                  <div className="confirm-row">
-                    <span className="confirm-row-label">Tonalité</span>
-                    <span className="confirm-row-value">
-                      {TONES.find((t) => t.value === form.tone)?.label}
-                    </span>
-                  </div>
-                  <div className="confirm-row">
-                    <span className="confirm-row-label">Template</span>
-                    <span className="confirm-row-value">
-                      {TEMPLATES.find((t) => t.value === form.template)?.label}
-                    </span>
-                  </div>
-                  <div className="confirm-row">
-                    <span className="confirm-row-label">Image</span>
-                    <span className="confirm-row-value" style={{ color: 'var(--success)' }}>
-                      ✅ {imageFile?.name}
-                    </span>
-                  </div>
-                </div>
+              <div className="field">
+                <label htmlFor="product-category">Catégorie</label>
+                <select
+                  id="product-category"
+                  name="category"
+                  value={form.category}
+                  onChange={updateField}
+                  required
+                >
+                  {CATEGORIES.map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
               </div>
-
-              {/* Info box */}
-              <div
-                style={{
-                  background: 'var(--gold-dim)',
-                  border: '1px solid rgba(212,160,85,0.25)',
-                  borderRadius: 'var(--radius-md)',
-                  padding: '16px 20px',
-                  marginBottom: '24px',
-                  fontSize: '0.87rem',
-                  color: 'var(--text-secondary)',
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: '10px',
-                }}
-              >
-                <span style={{ fontSize: '1.1rem' }}>⏱️</span>
-                <span>
-                  La génération prend environ{' '}
-                  <strong style={{ color: 'var(--gold)' }}>60 à 90 secondes</strong>.
-                  Vous serez redirigé automatiquement pour suivre la progression.
+              <div className="field">
+                <label htmlFor="campaign-language">Langue de la campagne</label>
+                <select
+                  id="campaign-language"
+                  name="language"
+                  value={form.language}
+                  onChange={updateField}
+                  required
+                >
+                  <option value="fr">Français</option>
+                  <option value="en">Anglais</option>
+                </select>
+              </div>
+              <div className="field">
+                <label htmlFor="campaign-seed">Graine créative</label>
+                <input
+                  id="campaign-seed"
+                  name="seed"
+                  type="number"
+                  min="0"
+                  max="4294967295"
+                  step="1"
+                  value={form.seed}
+                  onChange={updateField}
+                  aria-invalid={Boolean(errors.seed)}
+                  aria-describedby={errors.seed ? 'seed-error' : 'seed-help'}
+                />
+                <span id="seed-help" className="field-help">
+                  Gardez la même valeur pour reproduire la direction visuelle.
                 </span>
-              </div>
-
-              {/* Error */}
-              {submitError && (
-                <div className="auth-error" style={{ marginBottom: '20px' }}>
-                  <span>⚠️</span>
-                  {submitError}
-                </div>
-              )}
-
-              <div className="upload-nav">
-                <button
-                  className="btn btn-secondary"
-                  onClick={() => setStep(2)}
-                  disabled={submitting}
-                >
-                  ← Retour
-                </button>
-                <button
-                  className={`btn btn-primary btn-primary--large glow${submitting ? ' btn-loading' : ''}`}
-                  onClick={handleSubmit}
-                  disabled={submitting}
-                >
-                  <span>{submitting ? '' : '✨ Lancer la génération'}</span>
-                </button>
+                {errors.seed && (
+                  <span id="seed-error" className="field-error">
+                    {errors.seed}
+                  </span>
+                )}
               </div>
             </div>
-          )}
+          </section>
+
+          <section className="studio-panel">
+            <div className="studio-panel__heading">
+              <div>
+                <h2>Brief vérifié</h2>
+                <p>
+                  Le texte publicitaire ne peut reformuler que les faits fournis
+                  ici.
+                </p>
+              </div>
+            </div>
+
+            <div className="form-grid">
+              <div className="field field--span-2">
+                <label htmlFor="campaign-audience">Audience (optionnel)</label>
+                <input
+                  id="campaign-audience"
+                  name="audience"
+                  value={form.audience}
+                  onChange={updateField}
+                  maxLength={300}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="campaign-benefits">Bénéfices vérifiés</label>
+                <textarea
+                  id="campaign-benefits"
+                  name="benefits"
+                  rows="4"
+                  value={form.benefits}
+                  onChange={updateField}
+                  aria-describedby="evidence-language-guidance"
+                  placeholder="Un bénéfice par ligne"
+                  maxLength={1000}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="campaign-ingredients">Ingrédients vérifiés</label>
+                <textarea
+                  id="campaign-ingredients"
+                  name="ingredients"
+                  rows="4"
+                  value={form.ingredients}
+                  onChange={updateField}
+                  aria-describedby="evidence-language-guidance"
+                  placeholder="Un ingrédient par ligne"
+                  maxLength={1000}
+                />
+              </div>
+              <div className="field field--span-2">
+                <label htmlFor="campaign-claims">Allégations vérifiées</label>
+                <textarea
+                  id="campaign-claims"
+                  name="verifiedClaims"
+                  rows="3"
+                  value={form.verifiedClaims}
+                  onChange={updateField}
+                  aria-describedby="evidence-language-guidance"
+                  placeholder="Uniquement des affirmations que vous pouvez justifier"
+                  maxLength={1200}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="campaign-cta">Appel à l’action (optionnel)</label>
+                <input
+                  id="campaign-cta"
+                  name="cta"
+                  value={form.cta}
+                  onChange={updateField}
+                  aria-describedby="evidence-language-guidance"
+                  maxLength={80}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="campaign-direction">
+                  Direction créative (optionnel)
+                </label>
+                <input
+                  id="campaign-direction"
+                  name="creativeDirection"
+                  value={form.creativeDirection}
+                  onChange={updateField}
+                  maxLength={500}
+                />
+              </div>
+            </div>
+          </section>
         </div>
-      </div>
+
+        {submitError && (
+          <div className="inline-alert inline-alert--error" role="alert">
+            <div>
+              <strong>La campagne n’a pas été lancée.</strong>
+              <p>{submitError.message}</p>
+            </div>
+            {uploadedProductRef.current?.fingerprint === productFingerprint && (
+              <button
+                type="button"
+                className="button button--secondary"
+                onClick={retryLaunch}
+                disabled={submitting}
+              >
+                Réessayer le lancement
+              </button>
+            )}
+          </div>
+        )}
+
+        <footer className="campaign-form__footer">
+          <p>
+            Aucun bénéfice, ingrédient ou label ne sera ajouté sans preuve
+            fournie.
+          </p>
+          <button
+            type="submit"
+            className="button button--primary button--large"
+            disabled={submitting}
+          >
+            <span>{submitting ? 'Lancement en cours' : 'Lancer la campagne'}</span>
+            {!submitting && <ArrowRight size={18} aria-hidden="true" />}
+          </button>
+        </footer>
+      </form>
     </div>
   )
 }

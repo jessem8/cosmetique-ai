@@ -1,252 +1,268 @@
-import { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { products, generations } from '../api/client.js'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
+import {
+  ArrowRight,
+  ImageSquare,
+  Plus,
+  WarningCircle,
+} from '@phosphor-icons/react'
+import { generations } from '../api/client.js'
 
-const CATEGORY_LABELS = {
-  soin_visage: 'Soin Visage',
-  soin_corps: 'Soin Corps',
-  cheveux: 'Cheveux',
-  maquillage: 'Maquillage',
-  solaire: 'Solaire',
-  hygiene_deo: 'Hygiène & Déo',
+const STATUS_LABELS = {
+  pending: 'En attente',
+  processing: 'En création',
+  done: 'Terminée',
+  error: 'Arrêtée',
 }
 
-function formatDate(dateStr) {
-  if (!dateStr) return ''
-  return new Date(dateStr).toLocaleDateString('fr-FR', {
-    day: 'numeric',
-    month: 'long',
+const ERROR_LABELS = {
+  AI_RUNTIME_LOST: 'Session IA interrompue',
+  AI_SERVICE_UNAVAILABLE: 'Studio IA indisponible',
+  TARGET_AMBIGUOUS: 'Produit à confirmer',
+  TARGET_NOT_FOUND: 'Produit introuvable',
+  EXTRACTION_FAILED: 'Extraction impossible',
+  MASK_QUALITY_FAILED: 'Contour insuffisant',
+  CLAIM_SAFETY_FAILED: 'Texte non conforme',
+}
+
+const campaignHref = (generation) =>
+  generation.status === 'done'
+    ? `/result/${generation.id}`
+    : `/generations/${generation.id}`
+
+const formatDate = (value) => {
+  if (!value) return 'Date indisponible'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Date indisponible'
+  return new Intl.DateTimeFormat('fr-FR', {
+    day: '2-digit',
+    month: 'short',
     year: 'numeric',
-  })
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)
 }
 
-function StatusBadge({ status }) {
-  const map = {
-    pending:    { label: 'En attente', cls: 'badge-pending' },
-    processing: { label: 'En cours',   cls: 'badge-processing' },
-    done:       { label: 'Terminé',    cls: 'badge-done' },
-    error:      { label: 'Erreur',     cls: 'badge-error' },
-  }
-  const s = map[status] || map.pending
-  return <span className={`badge ${s.cls}`}>{s.label}</span>
-}
+function CampaignThumbnail({ generation }) {
+  const [url, setUrl] = useState(null)
 
-function SkeletonCard() {
+  useEffect(() => {
+    if (generation.status !== 'done') return undefined
+    const controller = new AbortController()
+    let objectUrl = null
+
+    generations
+      .getArtifact(generation.id, 'instagram.jpg', {
+        signal: controller.signal,
+      })
+      .then((response) => {
+        objectUrl = URL.createObjectURL(response.data)
+        setUrl(objectUrl)
+      })
+      .catch(() => {})
+
+    return () => {
+      controller.abort()
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [generation.id, generation.status])
+
   return (
-    <div className="skeleton-card">
-      <div className="skeleton-thumb" />
-      <div className="skeleton-body">
-        <div className="skeleton-line long" />
-        <div className="skeleton-line short" />
-        <div className="skeleton-line medium" />
-      </div>
+    <div className="campaign-row__media">
+      {url ? (
+        <img src={url} alt="" loading="lazy" />
+      ) : (
+        <ImageSquare size={28} weight="light" aria-hidden="true" />
+      )}
     </div>
   )
 }
 
 function Dashboard() {
-  const navigate = useNavigate()
-  const [items, setItems]   = useState([])   // [{product, generation}]
+  const [items, setItems] = useState([])
+  const [cursor, setCursor] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError]   = useState('')
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [error, setError] = useState(null)
+  const loadMoreControllerRef = useRef(null)
 
-  useEffect(() => { loadData() }, [])
+  const load = useCallback(
+    async ({ nextCursor = null, append = false, signal } = {}) => {
+      const response = await generations.list({
+        cursor: nextCursor,
+        limit: 20,
+        signal,
+      })
+      const body = response.data
+      const nextItems = Array.isArray(body) ? body : body.items || []
+      setItems((current) => (append ? [...current, ...nextItems] : nextItems))
+      setCursor(Array.isArray(body) ? null : body.next_cursor || null)
+    },
+    []
+  )
 
-  const loadData = async () => {
+  useEffect(() => {
+    const controller = new AbortController()
     setLoading(true)
-    setError('')
+    load({ signal: controller.signal })
+      .catch((requestError) => {
+        if (requestError.code !== 'REQUEST_CANCELLED') setError(requestError)
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false)
+      })
+    return () => {
+      controller.abort()
+      loadMoreControllerRef.current?.abort()
+    }
+  }, [load])
+
+  const loadMore = async () => {
+    if (!cursor) return
+    loadMoreControllerRef.current?.abort()
+    const controller = new AbortController()
+    loadMoreControllerRef.current = controller
+    setLoadingMore(true)
+    setError(null)
     try {
-      // 1. Get all products (returns {items: [...], total: N})
-      const productsRes = await products.list()
-      const productList = productsRes.data?.items || productsRes.data || []
-
-      // 2. For each product, get its most recent generation
-      //    using the dedicated endpoint GET /products/{id}/generations?limit=1
-      const enriched = await Promise.all(
-        productList.map(async (product) => {
-          try {
-            const genRes = await generations.listForProduct(product.id, 1)
-            const genList = genRes.data || []
-            return { product, generation: genList[0] || null }
-          } catch {
-            return { product, generation: null }
-          }
-        })
-      )
-
-      setItems(enriched)
-    } catch (err) {
-      setError(
-        err.response?.data?.detail ||
-          err.message ||
-          'Impossible de charger vos créations.'
-      )
+      await load({
+        nextCursor: cursor,
+        append: true,
+        signal: controller.signal,
+      })
+    } catch (requestError) {
+      if (
+        !controller.signal.aborted &&
+        requestError.code !== 'REQUEST_CANCELLED'
+      ) {
+        setError(requestError)
+      }
     } finally {
-      setLoading(false)
+      if (loadMoreControllerRef.current === controller) {
+        loadMoreControllerRef.current = null
+        if (!controller.signal.aborted) setLoadingMore(false)
+      }
     }
-  }
-
-  const handleCardClick = (item) => {
-    const gen = item.generation
-    if (!gen) {
-      // Product exists but no generation yet — start one
-      navigate('/new')
-      return
-    }
-    if (gen.status === 'done') {
-      navigate(`/result/${gen.id}`)
-    } else {
-      navigate(`/generations/${gen.id}`)
-    }
-  }
-
-  const getFirstAssetUrl = (gen) => {
-    if (!gen) return null
-    if (gen.assets && gen.assets.length > 0) return gen.assets[0].url
-    return null
   }
 
   return (
-    <div className="page-container">
-      <div className="page-content animate-enter">
-
-        {/* ── Header ────────────────────────────────────────────── */}
-        <div className="dashboard-header">
-          <div className="dashboard-title-group">
-            <h1 className="section-title">
-              Mes <span>Créations</span>
-            </h1>
-            {!loading && items.length > 0 && (
-              <div className="count-badge">{items.length}</div>
-            )}
-          </div>
-          <button
-            id="btn-new-product"
-            className="btn btn-primary glow"
-            onClick={() => navigate('/new')}
-          >
-            <span>Nouveau produit</span>
-          </button>
+    <div className="workspace-page workspace-page--wide">
+      <header className="library-heading">
+        <div>
+          <p className="eyebrow">Bibliothèque</p>
+          <h1>Campagnes</h1>
+          <p>Chaque génération conserve son brief, sa langue et son résultat.</p>
         </div>
-
-        {/* ── Error banner ───────────────────────────────────────── */}
-        {error && (
-          <div className="auth-error" style={{ marginBottom: '24px' }}>
-            <span>⚠️</span>
-            {error}
-            <button
-              onClick={loadData}
-              className="btn btn-ghost btn-sm"
-              style={{ marginLeft: 'auto' }}
-            >
-              Réessayer
-            </button>
-          </div>
+        {(loading || items.length > 0) && (
+          <Link className="button button--primary" to="/new">
+            <Plus size={18} aria-hidden="true" />
+            Créer une campagne
+          </Link>
         )}
+      </header>
 
-        {/* ── Grid ──────────────────────────────────────────────── */}
-        <div className="generation-grid">
-          {loading ? (
-            <>
-              <SkeletonCard />
-              <SkeletonCard />
-              <SkeletonCard />
-            </>
-          ) : items.length === 0 ? (
-            <div className="empty-state">
-              <div className="empty-state-icon">🧴</div>
-              <h2 className="empty-state-title">Aucune création pour l'instant</h2>
-              <p className="empty-state-text">
-                Importez votre première photo produit et laissez l'IA créer
-                vos affiches premium automatiquement.
-              </p>
+      {error && (
+        <div className="inline-alert inline-alert--error" role="alert">
+          <WarningCircle size={20} aria-hidden="true" />
+          <div>
+            <strong>Historique indisponible</strong>
+            <p>{error.message}</p>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="campaign-list" aria-label="Chargement de l’historique">
+          {[0, 1, 2].map((item) => (
+            <div className="campaign-row campaign-row--skeleton" key={item}>
+              <div className="skeleton skeleton--thumb" />
+              <div className="skeleton skeleton--body" />
+            </div>
+          ))}
+        </div>
+      ) : items.length === 0 ? (
+        <section className="empty-state">
+          <div className="empty-state__monogram" aria-hidden="true">
+            CA
+          </div>
+          <h2>Composez votre première campagne.</h2>
+          <p>
+            Importez un produit, donnez uniquement les faits vérifiés, puis
+            suivez chaque étape réelle de création.
+          </p>
+          <Link className="button button--primary" to="/new">
+            Créer une campagne
+          </Link>
+        </section>
+      ) : (
+        <>
+          <section className="campaign-list" aria-label="Historique des campagnes">
+            {items.map((generation) => {
+              const product = generation.product || {}
+              const name =
+                product.name || generation.product_name || 'Produit sans nom'
+              const brand = product.brand || generation.product_brand
+              return (
+                <article className="campaign-row" key={generation.id}>
+                  <CampaignThumbnail generation={generation} />
+                  <div className="campaign-row__main">
+                    <div>
+                      <h2>{name}</h2>
+                      <p>{brand || 'Marque non renseignée'}</p>
+                    </div>
+                    <dl className="campaign-row__meta">
+                      <div>
+                        <dt>Langue</dt>
+                        <dd>
+                          {generation.language === 'en' ? 'Anglais' : 'Français'}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Création</dt>
+                        <dd>{formatDate(generation.created_at)}</dd>
+                      </div>
+                    </dl>
+                  </div>
+                  <div className="campaign-row__status">
+                    <span
+                      className="status-label"
+                      data-status={generation.status}
+                    >
+                      {STATUS_LABELS[generation.status] || generation.status}
+                    </span>
+                    {generation.status === 'error' && (
+                      <span className="campaign-row__error">
+                        {ERROR_LABELS[generation.error?.code] ||
+                          generation.error?.message ||
+                          'Échec de la génération'}
+                      </span>
+                    )}
+                  </div>
+                  <Link
+                    className="icon-button campaign-row__link"
+                    to={campaignHref(generation)}
+                    aria-label={`Ouvrir la campagne ${name}`}
+                  >
+                    <ArrowRight size={19} aria-hidden="true" />
+                  </Link>
+                </article>
+              )
+            })}
+          </section>
+          {cursor && (
+            <div className="library-more">
               <button
-                id="btn-first-creation"
-                className="btn btn-primary btn-primary--large glow"
-                onClick={() => navigate('/new')}
+                type="button"
+                className="button button--secondary"
+                onClick={loadMore}
+                disabled={loadingMore}
               >
-                <span>Créer ma première affiche</span>
+                {loadingMore ? 'Chargement' : 'Afficher plus'}
               </button>
             </div>
-          ) : (
-            items.map((item, idx) => {
-              const { product, generation } = item
-              const thumbUrl = getFirstAssetUrl(generation)
-              const status   = generation?.status || 'none'
-
-              return (
-                <div
-                  key={product.id || idx}
-                  id={`card-product-${product.id}`}
-                  className="generation-card"
-                  onClick={() => handleCardClick(item)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => e.key === 'Enter' && handleCardClick(item)}
-                  style={{ animationDelay: `${idx * 0.05}s` }}
-                >
-                  {/* Thumbnail */}
-                  <div className="generation-card-thumbnail">
-                    {thumbUrl ? (
-                      <img src={thumbUrl} alt={product.name} loading="lazy" />
-                    ) : (
-                      <div
-                        style={{
-                          width: '100%', height: '100%',
-                          display: 'flex', alignItems: 'center',
-                          justifyContent: 'center',
-                          background: 'var(--bg-beige)',
-                          flexDirection: 'column', gap: '8px',
-                        }}
-                      >
-                        {status === 'processing' || status === 'pending' ? (
-                          <>
-                            <div
-                              style={{
-                                width: '32px', height: '32px',
-                                border: '3px solid rgba(244,131,155,0.2)',
-                                borderTopColor: 'var(--rose)',
-                                borderRadius: '50%',
-                                animation: 'spin 1s linear infinite',
-                              }}
-                            />
-                            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                              Génération…
-                            </span>
-                          </>
-                        ) : (
-                          <span style={{ fontSize: '2.5rem', opacity: 0.35 }}>🧴</span>
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Body */}
-                  <div className="generation-card-body">
-                    <div className="generation-card-name">
-                      {product.name || 'Produit sans nom'}
-                    </div>
-                    {product.brand && (
-                      <div className="generation-card-brand">{product.brand}</div>
-                    )}
-                    <div className="generation-card-meta">
-                      {product.category && (
-                        <span className="badge badge-category">
-                          {CATEGORY_LABELS[product.category] || product.category}
-                        </span>
-                      )}
-                      {generation && <StatusBadge status={status} />}
-                    </div>
-                    <div className="generation-card-date" style={{ marginTop: '8px' }}>
-                      {formatDate(generation?.created_at || product.created_at)}
-                    </div>
-                  </div>
-                </div>
-              )
-            })
           )}
-        </div>
-      </div>
+        </>
+      )}
     </div>
   )
 }

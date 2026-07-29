@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cosmetique-ai-core"
+version = "0.1.0"
+description = "Deterministic, evidence-constrained AI pipeline contracts for Cosmetique AI."
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "pydantic==2.9.2",
+  "Pillow==12.3.0",
+]
+
+[project.optional-dependencies]
+service = [
+  "fastapi==0.140.13",
+  "starlette==1.3.1",
+  "httpx==0.27.2",
+  "uvicorn==0.30.6",
+  "python-multipart==0.0.32",
+]
+gpu = [
+  "transformers==4.57.3",
+  "diffusers==0.35.2",
+  "accelerate==1.12.0",
+  "bitsandbytes==0.49.0",
+  "safetensors==0.6.2",
+  "huggingface-hub==0.36.0",
+]
+test = [
+  "pytest==8.3.5",
+  "fastapi==0.140.13",
+  "starlette==1.3.1",
+  "httpx==0.27.2",
+  "python-multipart==0.0.32",
+]
+
+[project.scripts]
+cosmetique-ai-evaluate = "ai_core.evaluation:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_core"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers -p no:cacheprovider"
+testpaths = ["tests"]
+pythonpath = ["src"]

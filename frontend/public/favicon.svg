@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Cosmetique AI">
+  <rect width="64" height="64" rx="12" fill="#191c21"/>
+  <path d="M13 13h38v38H13z" fill="none" stroke="#8f1644" stroke-width="2"/>
+  <text x="32" y="39" fill="#fff" font-family="Georgia,serif" font-size="23" text-anchor="middle">CA</text>
+</svg>

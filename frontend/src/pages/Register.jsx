@@ -1,21 +1,21 @@
-import { useState, useMemo } from 'react'
+import {
+  Check,
+  EnvelopeSimple,
+  Eye,
+  EyeSlash,
+  LockKey,
+} from '@phosphor-icons/react'
+import { useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { auth } from '../api/client.js'
+import { setSession } from '../auth/session.js'
+import AuthFrame from '../components/AuthFrame.jsx'
 
-function getPasswordStrength(password) {
-  if (!password) return { level: 'none', label: '', score: 0 }
-  let score = 0
-  if (password.length >= 8) score++
-  if (/[A-Z]/.test(password)) score++
-  if (/[0-9]/.test(password)) score++
-  if (/[^A-Za-z0-9]/.test(password)) score++
-
-  if (score === 1) return { level: 'weak', label: 'Faible', score }
-  if (score === 2) return { level: 'fair', label: 'Moyen', score }
-  if (score === 3) return { level: 'good', label: 'Bon', score }
-  if (score === 4) return { level: 'strong', label: 'Fort', score }
-  return { level: 'none', label: '', score: 0 }
-}
+const passwordRequirements = (password) => [
+  { label: '8 caractères minimum', met: password.length >= 8 },
+  { label: 'Une lettre majuscule', met: /[A-Z]/.test(password) },
+  { label: 'Un chiffre', met: /\d/.test(password) },
+]
 
 function Register() {
   const navigate = useNavigate()
@@ -25,290 +25,191 @@ function Register() {
     confirmPassword: '',
   })
   const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
   const [loading, setLoading] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
-
-  const strength = useMemo(
-    () => getPasswordStrength(form.password),
+  const requirements = useMemo(
+    () => passwordRequirements(form.password),
     [form.password]
   )
 
-  const reqs = [
-    { met: form.password.length >= 8, label: 'Au moins 8 caractères' },
-    { met: /[A-Z]/.test(form.password), label: 'Une lettre majuscule' },
-    { met: /[0-9]/.test(form.password), label: 'Un chiffre' },
-  ]
-
-  const handleChange = (e) => {
-    setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }))
+  const handleChange = ({ target }) => {
+    setForm((current) => ({ ...current, [target.name]: target.value }))
     setError('')
   }
 
-  const handleSubmit = async (e) => {
-    e.preventDefault()
-    if (!form.email || !form.password || !form.confirmPassword) {
+  const handleSubmit = async (event) => {
+    event.preventDefault()
+    setError('')
+    setSuccess('')
+
+    if (!form.email.trim() || !form.password || !form.confirmPassword) {
       setError('Veuillez remplir tous les champs.')
+      return
+    }
+    if (!requirements.every(({ met }) => met)) {
+      setError('Le mot de passe ne respecte pas encore les trois critères.')
       return
     }
     if (form.password !== form.confirmPassword) {
       setError('Les mots de passe ne correspondent pas.')
       return
     }
-    if (form.password.length < 8) {
-      setError('Le mot de passe doit contenir au moins 8 caractères.')
-      return
-    }
 
     setLoading(true)
-    setError('')
     try {
-      // Register
-      await auth.register({ email: form.email, password: form.password })
-      // Auto-login
-      const loginRes = await auth.login({
-        email: form.email,
+      const credentials = {
+        email: form.email.trim(),
         password: form.password,
-      })
-      const data = loginRes.data
-      const token = data.access_token || data.token || data.data?.access_token
-      const email = data.email || data.user?.email || form.email
-      localStorage.setItem('cosmetique_ai_token', token)
-      localStorage.setItem('cosmetique_ai_email', email)
-      navigate('/dashboard')
-    } catch (err) {
-      const msg =
-        err.response?.data?.detail ||
-        err.response?.data?.message ||
-        err.message ||
-        "Une erreur est survenue lors de l'inscription."
-      setError(msg)
+      }
+      await auth.register(credentials)
+
+      try {
+        const { data } = await auth.login(credentials)
+        const token = data.access_token || data.token || data.data?.access_token
+        const email = data.email || data.user?.email || credentials.email
+        setSession({ token, email })
+        navigate('/dashboard', { replace: true })
+      } catch {
+        setSuccess(
+          'Votre compte est créé. Vous pouvez maintenant vous connecter.'
+        )
+      }
+    } catch (requestError) {
+      setError(
+        requestError.message ||
+          'Impossible de créer votre compte pour le moment.'
+      )
     } finally {
       setLoading(false)
     }
   }
 
+  const confirmationMismatch =
+    Boolean(form.confirmPassword) && form.confirmPassword !== form.password
+
   return (
-    <div className="auth-page">
-      {/* Left panel */}
-      <div className="auth-left">
-        <div className="auth-left-orb auth-left-orb-1" />
-        <div className="auth-left-orb auth-left-orb-2" />
+    <AuthFrame>
+      <div className="auth-card">
+        <div className="auth-card__heading">
+          <p className="eyebrow">Nouveau studio</p>
+          <h1>Créer votre accès</h1>
+          <p>Un compte suffit pour conserver vos briefs et vos campagnes.</p>
+        </div>
 
-        <div className="auth-left-content animate-enter">
-          <span className="auth-logo-icon">✨</span>
-          <div className="auth-logo">Cosmetique AI</div>
+        <form className="auth-form" onSubmit={handleSubmit} noValidate>
+          {error ? (
+            <div className="alert alert--error" role="alert">
+              {error}
+            </div>
+          ) : null}
+          {success ? (
+            <div className="alert alert--success" role="status">
+              {success} <Link to="/login">Accéder à la connexion</Link>
+            </div>
+          ) : null}
 
-          <h2 className="auth-tagline">
-            Rejoignez la<br />
-            <span style={{ color: 'var(--gold)' }}>révolution</span> créative
-          </h2>
-          <p className="auth-description">
-            Créez un compte gratuit et commencez à générer vos
-            premières affiches cosmétiques IA en moins de 2 minutes.
-          </p>
-
-          <div className="auth-features">
-            <div className="auth-feature">
-              <div className="auth-feature-icon">🆓</div>
-              <span>Essai gratuit sans carte bancaire</span>
-            </div>
-            <div className="auth-feature">
-              <div className="auth-feature-icon">⚡</div>
-              <span>Résultats en moins de 90 secondes</span>
-            </div>
-            <div className="auth-feature">
-              <div className="auth-feature-icon">🌟</div>
-              <span>Qualité professionnelle garantie</span>
-            </div>
-            <div className="auth-feature">
-              <div className="auth-feature-icon">📦</div>
-              <span>3 formats téléchargeables instantanément</span>
+          <div className="field">
+            <label htmlFor="email">Adresse e-mail</label>
+            <div className="field__control">
+              <EnvelopeSimple size={19} aria-hidden="true" />
+              <input
+                id="email"
+                name="email"
+                type="email"
+                autoComplete="email"
+                placeholder="studio@marque.fr"
+                value={form.email}
+                onChange={handleChange}
+                disabled={loading}
+                required
+              />
             </div>
           </div>
-        </div>
-      </div>
 
-      {/* Right panel — Form */}
-      <div className="auth-right">
-        <div className="auth-form-container animate-enter animate-enter-delay-1">
-          <h1 className="auth-form-title">Créer un compte ✦</h1>
-          <p className="auth-form-subtitle">
-            Rejoignez des milliers de professionnels de la beauté
-          </p>
-
-          <form className="auth-form" onSubmit={handleSubmit} noValidate>
-            {/* Error */}
-            {error && (
-              <div className="auth-error">
-                <span>⚠️</span>
-                {error}
-              </div>
-            )}
-
-            {/* Email */}
-            <div className="form-group">
-              <label className="form-label" htmlFor="email">
-                Adresse e-mail
-              </label>
-              <div className="input-wrapper">
-                <span className="input-icon">✉</span>
-                <input
-                  id="email"
-                  name="email"
-                  type="email"
-                  autoComplete="email"
-                  className="input-field"
-                  placeholder="vous@exemple.com"
-                  value={form.email}
-                  onChange={handleChange}
-                  disabled={loading}
-                />
-              </div>
+          <div className="field">
+            <label htmlFor="password">Mot de passe</label>
+            <div className="field__control">
+              <LockKey size={19} aria-hidden="true" />
+              <input
+                id="password"
+                name="password"
+                type={showPassword ? 'text' : 'password'}
+                autoComplete="new-password"
+                placeholder="Choisissez un mot de passe"
+                value={form.password}
+                onChange={handleChange}
+                disabled={loading}
+                aria-describedby="password-rules"
+                required
+              />
+              <button
+                className="field__reveal"
+                type="button"
+                onClick={() => setShowPassword((visible) => !visible)}
+                aria-label={
+                  showPassword
+                    ? 'Masquer les mots de passe'
+                    : 'Afficher les mots de passe'
+                }
+                aria-pressed={showPassword}
+              >
+                {showPassword ? (
+                  <EyeSlash size={19} aria-hidden="true" />
+                ) : (
+                  <Eye size={19} aria-hidden="true" />
+                )}
+              </button>
             </div>
+            <ul className="password-rules" id="password-rules">
+              {requirements.map(({ label, met }) => (
+                <li className={met ? 'is-met' : ''} key={label}>
+                  <Check size={14} weight="bold" aria-hidden="true" />
+                  {label}
+                </li>
+              ))}
+            </ul>
+          </div>
 
-            {/* Password */}
-            <div className="form-group">
-              <label className="form-label" htmlFor="password">
-                Mot de passe
-              </label>
-              <div className="input-wrapper" style={{ position: 'relative' }}>
-                <span className="input-icon">🔒</span>
-                <input
-                  id="password"
-                  name="password"
-                  type={showPassword ? 'text' : 'password'}
-                  autoComplete="new-password"
-                  className="input-field"
-                  placeholder="••••••••"
-                  value={form.password}
-                  onChange={handleChange}
-                  disabled={loading}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  style={{
-                    position: 'absolute',
-                    right: '14px',
-                    top: '50%',
-                    transform: 'translateY(-50%)',
-                    background: 'none',
-                    border: 'none',
-                    color: 'var(--text-muted)',
-                    cursor: 'pointer',
-                    fontSize: '0.85rem',
-                    padding: '2px',
-                  }}
-                  tabIndex={-1}
-                >
-                  {showPassword ? '🙈' : '👁'}
-                </button>
-              </div>
-
-              {/* Password strength indicator */}
-              {form.password && (
-                <div className="password-strength">
-                  <div
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      marginBottom: '4px',
-                      fontSize: '0.75rem',
-                    }}
-                  >
-                    <span style={{ color: 'var(--text-muted)' }}>
-                      Sécurité
-                    </span>
-                    <span
-                      style={{
-                        color:
-                          strength.level === 'strong'
-                            ? 'var(--success)'
-                            : strength.level === 'good'
-                            ? 'var(--info)'
-                            : strength.level === 'fair'
-                            ? 'var(--warning)'
-                            : 'var(--error)',
-                        fontWeight: 600,
-                      }}
-                    >
-                      {strength.label}
-                    </span>
-                  </div>
-                  <div className="password-strength-bar">
-                    <div
-                      className={`password-strength-fill ${strength.level}`}
-                    />
-                  </div>
-                  <div className="password-requirements">
-                    {reqs.map((req, i) => (
-                      <div
-                        key={i}
-                        className={`password-req${req.met ? ' met' : ''}`}
-                      >
-                        <span className="password-req-icon">
-                          {req.met ? '✓' : '○'}
-                        </span>
-                        {req.label}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Confirm password */}
-            <div className="form-group">
-              <label className="form-label" htmlFor="confirmPassword">
-                Confirmer le mot de passe
-              </label>
-              <div className="input-wrapper">
-                <span className="input-icon">🔑</span>
-                <input
-                  id="confirmPassword"
-                  name="confirmPassword"
-                  type={showPassword ? 'text' : 'password'}
-                  autoComplete="new-password"
-                  className={`input-field${
-                    form.confirmPassword && form.confirmPassword !== form.password
-                      ? ' error'
-                      : ''
-                  }`}
-                  placeholder="••••••••"
-                  value={form.confirmPassword}
-                  onChange={handleChange}
-                  disabled={loading}
-                />
-              </div>
-              {form.confirmPassword && form.confirmPassword !== form.password && (
-                <span className="form-error">
-                  Les mots de passe ne correspondent pas
-                </span>
-              )}
-            </div>
-
-            {/* Submit */}
-            <button
-              type="submit"
-              className={`btn btn-primary btn-primary--large${loading ? ' btn-loading' : ''}`}
-              disabled={loading}
-              style={{ width: '100%' }}
+          <div className="field">
+            <label htmlFor="confirmPassword">Confirmer le mot de passe</label>
+            <div
+              className={`field__control${confirmationMismatch ? ' is-invalid' : ''}`}
             >
-              <span>{loading ? '' : '🚀 Créer mon compte'}</span>
-            </button>
-          </form>
+              <LockKey size={19} aria-hidden="true" />
+              <input
+                id="confirmPassword"
+                name="confirmPassword"
+                type={showPassword ? 'text' : 'password'}
+                autoComplete="new-password"
+                placeholder="Saisissez-le à nouveau"
+                value={form.confirmPassword}
+                onChange={handleChange}
+                disabled={loading}
+                aria-invalid={confirmationMismatch}
+                aria-describedby={
+                  confirmationMismatch ? 'password-mismatch' : undefined
+                }
+                required
+              />
+            </div>
+            {confirmationMismatch ? (
+              <p className="field__error" id="password-mismatch">
+                Les mots de passe ne correspondent pas.
+              </p>
+            ) : null}
+          </div>
 
-          <div className="auth-divider">ou</div>
+          <button className="button button--primary button--wide" disabled={loading}>
+            {loading ? 'Création en cours…' : 'Créer mon compte'}
+          </button>
+        </form>
 
-          <p className="auth-link-row">
-            Déjà un compte ?{' '}
-            <Link to="/login" style={{ fontWeight: 600 }}>
-              Se connecter
-            </Link>
-          </p>
-        </div>
+        <p className="auth-card__switch">
+          Déjà un compte ? <Link to="/login">Se connecter</Link>
+        </p>
       </div>
-    </div>
+    </AuthFrame>
   )
 }
 

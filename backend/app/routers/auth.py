@@ -9,17 +9,18 @@ Security measures:
 """
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import select
-from slowapi import Limiter
-from slowapi.util import get_remote_address
+from sqlalchemy.exc import IntegrityError
 
+from app.core.rate_limit import limiter
 from app.core.security import create_access_token, hash_password, verify_password
 from app.dependencies import DBSession
 from app.models import User
 from app.schemas import LoginRequest, Token, UserCreate, UserOut
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
-# Use the app-level limiter (configured in main.py) — avoid double instantiation
-limiter = Limiter(key_func=get_remote_address, default_limits=[])
+DUMMY_PASSWORD_HASH = (
+    "$2b$12$nQTbq3VpEWvDsn7WWHMie.OzLtF88/E4SRGj63bmJ9xlIs8g5erzm"
+)
 
 
 @router.post(
@@ -49,7 +50,14 @@ async def register(request: Request, body: UserCreate, db: DBSession) -> User:
         hashed_password=hash_password(body.password),
     )
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Impossible de créer ce compte.",
+        ) from exc
     db.refresh(user)
     return user
 
@@ -70,8 +78,7 @@ async def login(request: Request, body: LoginRequest, db: DBSession) -> dict:
     user = db.scalar(select(User).where(User.email == body.email))
 
     # Always call verify_password to prevent timing attacks even if user not found
-    dummy_hash = "$2b$12$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    hashed = user.hashed_password if user else dummy_hash
+    hashed = user.hashed_password if user else DUMMY_PASSWORD_HASH
     valid = verify_password(body.password, hashed)
 
     if not user or not valid or not user.is_active:
