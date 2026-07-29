@@ -54,8 +54,8 @@ Sans Colab prêt, le site démarre mais les générations GPU échoueront explic
 
 ## Dépôt GitHub
 
-Repo privé : `https://github.com/jessem8/cosmetique-ai`  
-(Branche de travail : `codex/implementation` — à confirmer après push.)
+Repo privé : https://github.com/jessem8/cosmetique-ai  
+Branche : `codex/implementation`
 
 ## Documents utiles
 

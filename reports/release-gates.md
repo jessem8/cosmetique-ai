@@ -79,4 +79,6 @@ Evidence pack: `C:\gf_ai_task\handoff\verification-evidence.md` (mirrored under
 - [ ] Fresh Google Colab T4 **Run all** completes without notebook repair.
 - [ ] Cached cold and warm generation targets are measured separately.
 - [ ] Authorized 24-image private evaluation meets every quality and claim gate.
-- [ ] Private GitHub destination and authenticated push are verified.
+- [x] Private GitHub destination and authenticated push are verified —
+  `https://github.com/jessem8/cosmetique-ai` private; branch
+  `codex/implementation` at `c752f34`.

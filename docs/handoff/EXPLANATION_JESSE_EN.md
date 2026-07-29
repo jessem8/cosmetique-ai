@@ -43,7 +43,7 @@ You cannot finish the official T4 gate on your RTX 5050 (~8 GiB); the project 
 
 ## Repo
 
-Private GitHub: `https://github.com/jessem8/cosmetique-ai` (after push).  
+Private GitHub: https://github.com/jessem8/cosmetique-ai (private).  
 Working tree: `C:\gf_ai_task\fully_cloned\Stage_1_ouvrier` on branch `codex/implementation`.
 
 ## Fixes landed in this finish pass
