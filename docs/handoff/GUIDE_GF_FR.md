@@ -24,7 +24,8 @@ Ton navigateur  →  site Docker (localhost)
 
 - Un compte Google (pour Colab)
 - **Docker Desktop** installé et démarré
-- Accès au repo GitHub (Jesse t’ajoute) **ou** au dossier Drive ci-dessous
+- Accès au repo GitHub (Jesse t’ajoute comme collaboratrice)
+- Accès **complet** au dossier Google Drive ci-dessous (Jesse t’a déjà invitée en accès complet)
 - Une photo produit autorisée pour le test
 
 ### Liens
@@ -32,10 +33,10 @@ Ton navigateur  →  site Docker (localhost)
 | Quoi | Lien |
 |------|------|
 | GitHub (code) | https://github.com/jessem8/cosmetique-ai — branche `codex/implementation` |
-| Google Drive (même projet) | https://drive.google.com/drive/folders/1ADA3bmL8NTdYto1IheDGE16dRkC53ldM |
+| Google Drive (même projet, **accès complet déjà partagé avec toi**) | https://drive.google.com/drive/folders/1ADA3bmL8NTdYto1IheDGE16dRkC53ldM |
 | Notebook Colab | dans le projet : `notebook/pipeline_ia_cosmetique.ipynb` |
 
-Le dossier Drive doit contenir `Stage_1_ouvrier` avec `ai_core` dedans (c’est normal).
+Le dossier Drive doit contenir `Stage_1_ouvrier` avec `ai_core` dedans (c’est normal). Ouvre-le avec le compte Google qui a reçu l’invitation.
 
 ---
 
@@ -53,9 +54,10 @@ cd cosmetique-ai
 
 ### Option B — Drive
 
-1. Ouvre le lien Drive ci-dessus.
-2. Télécharge le dossier `Stage_1_ouvrier`.
-3. Ouvre ce dossier dans PowerShell (`cd` vers ce dossier).
+1. Accepte l’invitation Drive (accès complet) si tu ne l’as pas encore fait.
+2. Ouvre le lien Drive ci-dessus avec **ton** compte Google.
+3. Télécharge le dossier `Stage_1_ouvrier` (ou travaille depuis une copie locale).
+4. Ouvre ce dossier dans PowerShell (`cd` vers ce dossier).
 
 Tu travailles toujours **à la racine** du projet (là où se trouvent `docker/`, `notebook/`, `frontend/`).
 
