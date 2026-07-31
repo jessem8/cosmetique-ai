@@ -256,6 +256,11 @@ def _default_bitsandbytes_probe(torch: Any) -> bool:
                         break
                     except Exception:
                         pass
+        import ctypes
+        try:
+            ctypes.CDLL(target, mode=ctypes.RTLD_GLOBAL)
+        except Exception:
+            pass
         import bitsandbytes.cextension as bnb_cextension
         from bitsandbytes.nn import Linear4bit
 
