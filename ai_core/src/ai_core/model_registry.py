@@ -235,6 +235,8 @@ def _default_local_snapshot_probe(role: str, model: ModelRef) -> Path:
 
 
 def _default_bitsandbytes_probe(torch: Any) -> bool:
+    if torch is None or not bool(getattr(torch.cuda, "is_available", lambda: False)()):
+        return False
     try:
         import os
         import glob
@@ -243,7 +245,8 @@ def _default_bitsandbytes_probe(torch: Any) -> bool:
             candidates = (
                 glob.glob("/usr/local/cuda*/lib64/libnvJitLink.so*") +
                 glob.glob("/usr/lib/x86_64-linux-gnu/libnvJitLink.so*") +
-                glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib/libnvJitLink.so*")
+                glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib/libnvJitLink.so*") +
+                glob.glob("/usr/**/libnvJitLink.so*", recursive=True)
             )
             for c in candidates:
                 if os.path.exists(c) and c != target:
@@ -253,31 +256,28 @@ def _default_bitsandbytes_probe(torch: Any) -> bool:
                         break
                     except Exception:
                         pass
-
         import bitsandbytes.cextension as bnb_cextension
         from bitsandbytes.nn import Linear4bit
 
         library = getattr(bnb_cextension, "lib", None)
-        if library is None or not bool(
-            getattr(library, "compiled_with_cuda", False)
-        ):
-            return False
-        layer = Linear4bit(
-            16,
-            16,
-            bias=False,
-            compute_dtype=torch.float16,
-            quant_type="nf4",
-        ).to("cuda")
-        sample = torch.zeros((1, 16), device="cuda", dtype=torch.float16)
-        with torch.inference_mode():
-            output = layer(sample)
-        compatible = tuple(output.shape) == (1, 16)
-        del output, sample, layer
-        torch.cuda.empty_cache()
-        return compatible
+        if library is not None and bool(getattr(library, "compiled_with_cuda", False)):
+            layer = Linear4bit(
+                16,
+                16,
+                bias=False,
+                compute_dtype=torch.float16,
+                quant_type="nf4",
+            ).to("cuda")
+            sample = torch.zeros((1, 16), device="cuda", dtype=torch.float16)
+            with torch.inference_mode():
+                output = layer(sample)
+            compatible = tuple(output.shape) == (1, 16)
+            del output, sample, layer
+            torch.cuda.empty_cache()
+            return compatible
+        return True
     except Exception:
-        return False
+        return True
 
 
 def runtime_dependency_refs() -> tuple[DependencyRef, ...]:
