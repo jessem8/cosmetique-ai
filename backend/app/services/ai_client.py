@@ -160,7 +160,13 @@ class AIClient:
         self.base_url = base_url.rstrip("/")
         self._client = httpx.Client(
             base_url=self.base_url,
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+                # Prefer uncompressed bodies so size limits match Content-Length
+                # and rebuilt responses are not double-decoded.
+                "Accept-Encoding": "identity",
+            },
             timeout=timeout_seconds,
             follow_redirects=False,
             transport=transport,
@@ -195,15 +201,27 @@ class AIClient:
                     if total > MAX_JSON_RESPONSE_BYTES:
                         raise AIProtocolError("Réponse distante trop volumineuse.")
                     chunks.append(chunk)
+                # iter_bytes() already decompresses; drop encoding headers so the
+                # rebuilt Response is not decoded a second time (Cloudflare gzip).
+                headers = {
+                    key: value
+                    for key, value in response.headers.items()
+                    if key.lower()
+                    not in {
+                        "content-encoding",
+                        "content-length",
+                        "transfer-encoding",
+                    }
+                }
                 return httpx.Response(
                     response.status_code,
-                    headers=response.headers,
+                    headers=headers,
                     content=b"".join(chunks),
                     request=response.request,
                 )
         except AIClientError:
             raise
-        except httpx.TransportError as exc:
+        except (httpx.TransportError, httpx.DecodingError) as exc:
             raise AIServiceUnavailable("Service distant indisponible.") from exc
 
     @staticmethod

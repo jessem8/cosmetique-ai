@@ -56,6 +56,34 @@ def test_health_is_authenticated_and_returns_runtime_contract():
     assert client_with(handler).health().runtime_id == "runtime-a"
 
 
+def test_health_accepts_gzip_encoded_json_bodies():
+    import gzip
+    import json
+
+    payload = {
+        "ready": True,
+        "runtime_id": "runtime-gzip",
+        "gpu": {"available": True, "name": "Tesla T4", "vram_bytes": 1},
+        "models": PINNED_HEALTH_MODELS,
+        "pipeline_version": "0.1.0",
+    }
+    compressed = gzip.compress(json.dumps(payload).encode("utf-8"))
+
+    def handler(request: httpx.Request):
+        assert request.headers.get("accept-encoding") == "identity"
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "application/json",
+                "content-encoding": "gzip",
+                "content-length": str(len(compressed)),
+            },
+            content=compressed,
+        )
+
+    assert client_with(handler).health().runtime_id == "runtime-gzip"
+
+
 @pytest.mark.parametrize(
     "models",
     [

@@ -60,6 +60,11 @@ _MODEL_SNAPSHOT_PATTERNS: dict[str, tuple[str, ...]] = {
     "grounding_dino": (
         "config.json",
         "preprocessor_config.json",
+        "tokenizer_config.json",
+        "tokenizer.json",
+        "vocab.txt",
+        "special_tokens_map.json",
+        "added_tokens.json",
         "*.safetensors",
     ),
     "sam": (
@@ -99,6 +104,8 @@ _MODEL_REQUIRED_FILES: dict[str, tuple[tuple[str, ...], ...]] = {
     "grounding_dino": (
         ("config.json",),
         ("preprocessor_config.json",),
+        ("tokenizer_config.json",),
+        ("vocab.txt", "tokenizer.json"),
         ("model.safetensors", "*.safetensors"),
     ),
     "sam": (

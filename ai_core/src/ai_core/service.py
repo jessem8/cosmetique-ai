@@ -568,6 +568,13 @@ def create_app(
                     message=str(exc),
                 )
         except Exception:
+            import logging
+            import traceback
+
+            logging.getLogger(__name__).exception(
+                "runtime pipeline failed unexpectedly"
+            )
+            traceback.print_exc()
             store.discard_bundle(runtime_job.id)
             with store.lock:
                 runtime_job.status = GenerationStatus.ERROR

@@ -47,6 +47,16 @@ def _release_cuda(torch: Any) -> None:
             ipc_collect()
 
 
+def _batch_to_device(batch: Any, *, device: str, dtype: Any) -> Any:
+    """Move a processor batch to device and cast floating tensors to model dtype."""
+
+    moved = batch.to(device)
+    for key, value in list(moved.items()):
+        if hasattr(value, "is_floating_point") and value.is_floating_point():
+            moved[key] = value.to(dtype=dtype)
+    return moved
+
+
 class _LazyAdapter:
     def __init__(self, *, backend_factory: Callable[[], Any] | None = None) -> None:
         self._backend_factory = backend_factory
@@ -214,10 +224,12 @@ class _GroundingDinoBackend:
             trust_remote_code=False,
             local_files_only=True,
         )
+        # float32: Grounding DINO's text/vision path is unreliable under mixed
+        # precision on current transformers + Colab torch builds.
         self._model = AutoModelForZeroShotObjectDetection.from_pretrained(
             ref.repo_id,
             revision=ref.revision,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float32,
             trust_remote_code=False,
             local_files_only=True,
         ).to(self._device)
@@ -308,11 +320,15 @@ class _SamBackend:
             (target.x + target.width) * image.width,
             (target.y + target.height) * image.height,
         ]
-        inputs = self._processor(
-            images=image.convert("RGB"),
-            input_boxes=[[box]],
-            return_tensors="pt",
-        ).to(self._device)
+        inputs = _batch_to_device(
+            self._processor(
+                images=image.convert("RGB"),
+                input_boxes=[[box]],
+                return_tensors="pt",
+            ),
+            device=self._device,
+            dtype=next(self._model.parameters()).dtype,
+        )
         with self._torch.inference_mode():
             outputs = self._model(**inputs, multimask_output=True)
         masks = self._processor.image_processor.post_process_masks(
