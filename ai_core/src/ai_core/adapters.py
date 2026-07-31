@@ -211,6 +211,12 @@ class _GroundingDinoBackend:
         import torch
 
         _require_cuda(torch)
+        try:
+            import torchvision  # noqa: F401
+        except Exception:
+            import sys
+            sys.modules["torchvision"] = None
+
         from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
         ref = pinned_model_refs()["grounding_dino"]
