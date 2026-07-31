@@ -211,11 +211,7 @@ class _GroundingDinoBackend:
         import torch
 
         _require_cuda(torch)
-        try:
-            import torchvision  # noqa: F401
-        except Exception:
-            import sys
-            sys.modules["torchvision"] = None
+        import torchvision  # noqa: F401
 
         from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
