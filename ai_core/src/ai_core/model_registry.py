@@ -236,6 +236,24 @@ def _default_local_snapshot_probe(role: str, model: ModelRef) -> Path:
 
 def _default_bitsandbytes_probe(torch: Any) -> bool:
     try:
+        import os
+        import glob
+        target = "/usr/local/cuda/lib64/libnvJitLink.so.13"
+        if not os.path.exists(target):
+            candidates = (
+                glob.glob("/usr/local/cuda*/lib64/libnvJitLink.so*") +
+                glob.glob("/usr/lib/x86_64-linux-gnu/libnvJitLink.so*") +
+                glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib/libnvJitLink.so*")
+            )
+            for c in candidates:
+                if os.path.exists(c) and c != target:
+                    try:
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        os.symlink(c, target)
+                        break
+                    except Exception:
+                        pass
+
         import bitsandbytes.cextension as bnb_cextension
         from bitsandbytes.nn import Linear4bit
 
