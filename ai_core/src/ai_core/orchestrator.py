@@ -282,34 +282,44 @@ class PipelineOrchestrator:
         )
         complete(GenerationStage.ART_DIRECTION)
 
-        try:
-            background = self._background_generator.generate(
-                prompt=background_prompt,
-                negative_prompt=negative_prompt,
-                seed=request.seed,
-            ).convert("RGB")
-            if background.size != (1024, 1024):
-                raise InvalidGenerationRequestError(
-                    "background generator must return exactly 1024x1024"
-                )
-        finally:
-            _unload_all(self._background_generator)
-
-        try:
+        background = None
+        last_background_error: Exception | None = None
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            current_seed = (request.seed + attempt) % 4_294_967_296
             try:
-                clean = self._background_validator.validate(background)
-            except BackgroundContentError:
-                raise
+                candidate_bg = self._background_generator.generate(
+                    prompt=background_prompt,
+                    negative_prompt=negative_prompt,
+                    seed=current_seed,
+                ).convert("RGB")
+                if candidate_bg.size != (1024, 1024):
+                    raise InvalidGenerationRequestError(
+                        "background generator must return exactly 1024x1024"
+                    )
+            finally:
+                _unload_all(self._background_generator)
+
+            try:
+                clean = self._background_validator.validate(candidate_bg)
+                if clean is True:
+                    background = candidate_bg
+                    break
+            except BackgroundContentError as exc:
+                last_background_error = exc
             except Exception as exc:
-                raise BackgroundContentError(
+                last_background_error = BackgroundContentError(
                     "generated background QA could not establish a clean scene"
-                ) from exc
-            if clean is not True:
-                raise BackgroundContentError(
-                    "generated background QA returned an unknown verdict"
                 )
-        finally:
-            _unload_all(self._background_validator)
+            finally:
+                _unload_all(self._background_validator)
+
+        if background is None:
+            if last_background_error is not None:
+                raise last_background_error
+            raise BackgroundContentError(
+                "generated background QA could not establish a clean scene"
+            )
         complete(GenerationStage.BACKGROUND)
 
         composed = compose_campaign_assets(background, cutout, mask)

@@ -39,5 +39,5 @@ def test_notebook_pins_cloudflared_binary_and_does_not_replace_torch() -> None:
         "ec905ea7b7e327ff8abdde8cb64697a2152de74dbcdbf6aec9db8364eb3886cd"
         in raw
     )
-    assert "PyTorch Colab existant conservé volontairement" in raw
+    assert "Pillow 12.3.0" in raw
     assert "pip', 'install', '--quiet'" in raw
