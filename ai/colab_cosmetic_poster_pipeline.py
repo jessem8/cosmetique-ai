@@ -512,15 +512,23 @@ def generate_text_only(
     product_name: str,
     category: str,
     tone: str = "premium",
+    metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     ocr = {"text": normalize_ocr_text(ocr_text), "items": []}
-    metadata = {
-        "brand": brand,
-        "product_name": product_name,
-        "category": normalize_category(category),
-        "tone": tone,
+    supplied = {
+        str(key): str(value).strip()
+        for key, value in (metadata or {}).items()
+        if value is not None and str(value).strip()
     }
-    return generate_marketing_copy(ocr, metadata, tone)
+    supplied.update(
+        {
+            "brand": brand,
+            "product_name": product_name,
+            "category": normalize_category(category),
+            "tone": tone,
+        }
+    )
+    return generate_marketing_copy(ocr, supplied, tone)
 
 
 def create_app() -> Any:
@@ -599,6 +607,7 @@ def create_app() -> Any:
                 product_name=str(payload.get("product_name", "")),
                 category=str(payload.get("category", "")),
                 tone=str(payload.get("tone", "premium")),
+                metadata=payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else None,
             )
         except PipelineError as exc:
             from fastapi import HTTPException
