@@ -300,7 +300,7 @@ class GenerationWorker:
                 ):
                     raise RuntimeError("Job non modifiable.")
                 db.execute(delete(Asset).where(Asset.generation_id == generation_id))
-                for name in sorted(ARTIFACT_NAMES):
+                for name in sorted(ARTIFACT_NAMES & set(installed.artifact_keys)):
                     if name == "manifest.json":
                         payload = validated.members[name]
                         record = {
