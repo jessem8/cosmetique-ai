@@ -243,7 +243,7 @@ def create_generation(
 
     try:
         with AIClient(
-            base_url=settings.AI_SERVICE_URL,
+            base_url=settings.COLAB_AI_URL,
             token=settings.AI_SERVICE_TOKEN,
             timeout_seconds=settings.AI_HEALTH_TIMEOUT_SECONDS,
         ) as client:
