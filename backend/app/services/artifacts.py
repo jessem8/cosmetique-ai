@@ -1,151 +1,226 @@
-"""Backend bindings for the canonical ``ai_core`` artifact contract."""
+"""Validation for the six-member Colab campaign contract."""
 from __future__ import annotations
 
 import hashlib
 import io
+import json
 import zipfile
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import ValidationError
+from PIL import Image, UnidentifiedImageError
 
-from ai_core.artifacts import (
-    ARTIFACT_ORDER,
-    PIPELINE_VERSION,
-    validate_bundle as validate_core_bundle,
+
+REQUIRED_ARCHIVE_FILES = frozenset(
+    {
+        "instagram.jpg",
+        "facebook.jpg",
+        "linkedin.jpg",
+        "copy.json",
+        "ocr.json",
+        "manifest.json",
+    }
 )
-from ai_core.errors import ArtifactContractError as CoreArtifactContractError
-from ai_core.model_registry import PINNED_DEPENDENCIES, pinned_model_refs
-from ai_core.schemas import CopyPayload, NormalizedBox
-
-
-ARTIFACT_NAMES = frozenset(ARTIFACT_ORDER)
-CHECKSUM_MEMBER_NAMES = ARTIFACT_NAMES - {"manifest.json"}
-EXPECTED_DEPENDENCIES = {
-    dependency.name.casefold(): dependency.version
-    for dependency in PINNED_DEPENDENCIES
-}
-RUNTIME_DEPENDENCY_NAMES = {"torch", "cuda_runtime"}
-EXPECTED_MODELS = pinned_model_refs()
-_UNSET = object()
+OPTIONAL_ARCHIVE_FILES = frozenset({"cutout.png", "mask.png", "background.jpg"})
+ARTIFACT_NAMES = REQUIRED_ARCHIVE_FILES
+CHECKSUM_MEMBER_NAMES = ARTIFACT_NAMES
+PIPELINE_VERSION = "1.1.0"
+MAX_BUNDLE_BYTES = 50 * 1024 * 1024
+MAX_UNCOMPRESSED_BYTES = 150 * 1024 * 1024
 
 
 class ArtifactContractError(RuntimeError):
-    """The remote bundle does not satisfy the trusted application contract."""
+    """The remote ZIP does not satisfy the trusted Colab contract."""
 
 
 class ArtifactChecksumMismatch(ArtifactContractError):
-    """A bundle member does not match its signed manifest metadata."""
+    """A member checksum or manifest checksum is invalid."""
 
 
 @dataclass(frozen=True)
 class ValidatedBundle:
     manifest: dict[str, Any]
     copy: dict[str, Any]
+    ocr: dict[str, Any]
     members: dict[str, bytes]
+    records: dict[str, dict[str, Any]]
     checksum: str
 
 
-def _reject(message: str) -> ArtifactContractError:
-    if "checksum" in message.casefold():
-        return ArtifactChecksumMismatch("L'empreinte d'un artefact est invalide.")
-    return ArtifactContractError("Le bundle ne respecte pas le contrat d'artefacts.")
+def _strict_json(payload: bytes, name: str) -> dict[str, Any]:
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ArtifactContractError(f"{name} contains duplicate JSON keys")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(payload.decode("utf-8"), object_pairs_hook=reject_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ArtifactContractError(f"{name} is not strict UTF-8 JSON") from exc
+    if not isinstance(value, dict):
+        raise ArtifactContractError(f"{name} must contain an object")
+    return value
 
 
-def _language_value(value: Any) -> str:
-    return value.value if hasattr(value, "value") else str(value)
+def _copy_contract(copy: dict[str, Any]) -> None:
+    required = {
+        "brand",
+        "product_name",
+        "category",
+        "titre",
+        "sous_titre",
+        "bullets",
+        "cta",
+        "hashtags",
+        "_meta",
+    }
+    if set(copy) != required:
+        raise ArtifactContractError("copy.json fields do not match the strict contract")
+    for field in ("brand", "product_name", "category", "titre", "sous_titre", "cta"):
+        if not isinstance(copy[field], str) or not copy[field].strip():
+            raise ArtifactContractError(f"copy.json {field} must be non-empty text")
+    if not isinstance(copy["bullets"], list) or len(copy["bullets"]) > 3:
+        raise ArtifactContractError("copy.json bullets are invalid")
+    if not all(isinstance(item, str) and item.strip() for item in copy["bullets"]):
+        raise ArtifactContractError("copy.json bullets must be non-empty strings")
+    if not isinstance(copy["hashtags"], list) or len(copy["hashtags"]) > 5:
+        raise ArtifactContractError("copy.json hashtags are invalid")
+    if not all(isinstance(item, str) and item.strip() for item in copy["hashtags"]):
+        raise ArtifactContractError("copy.json hashtags must be non-empty strings")
+    meta = copy["_meta"]
+    if not isinstance(meta, dict):
+        raise ArtifactContractError("copy.json _meta must be an object")
+    if not isinstance(meta.get("ocr_text"), str) or not meta["ocr_text"].strip():
+        raise ArtifactContractError("copy.json _meta.ocr_text is required")
+    if meta.get("source") != "ocr+metadata":
+        raise ArtifactContractError("copy.json _meta.source must be ocr+metadata")
+    lowered = json.dumps(copy, ensure_ascii=False).casefold()
+    for placeholder in ("maison exemple", "example brand", "hydra glow serum"):
+        if placeholder in lowered:
+            raise ArtifactContractError("copy.json contains placeholder copy")
+    for claim in ("clinique", "dermatologique", "guérit", "traite"):
+        if claim in lowered and claim not in meta["ocr_text"].casefold():
+            raise ArtifactContractError("copy.json contains an unsupported claim")
+
+
+def _image_record(name: str, payload: bytes) -> dict[str, Any]:
+    try:
+        with Image.open(io.BytesIO(payload)) as image:
+            image.load()
+            image_format = image.format
+            size = image.size
+            mode = image.mode
+    except (OSError, UnidentifiedImageError) as exc:
+        raise ArtifactContractError(f"{name} is not a readable image") from exc
+
+    expected = {
+        "instagram.jpg": ((1080, 1080), "JPEG", "RGB"),
+        "facebook.jpg": ((1200, 630), "JPEG", "RGB"),
+        "linkedin.jpg": ((1200, 627), "JPEG", "RGB"),
+        "background.jpg": ((1024, 1024), "JPEG", "RGB"),
+        "cutout.png": (None, "PNG", "RGBA"),
+        "mask.png": (None, "PNG", "L"),
+    }.get(name)
+    if expected is None:
+        raise ArtifactContractError(f"unknown image artifact {name}")
+    expected_size, expected_format, expected_mode = expected
+    if expected_size is not None and size != expected_size:
+        raise ArtifactContractError(
+            f"{name} must be exactly {expected_size[0]}x{expected_size[1]}"
+        )
+    if image_format != expected_format or mode != expected_mode:
+        raise ArtifactContractError(f"{name} has the wrong image format or mode")
+    return {
+        "name": name,
+        "mime": "image/png" if expected_format == "PNG" else "image/jpeg",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
+        "width": size[0],
+        "height": size[1],
+    }
 
 
 def validate_bundle(
     bundle: bytes,
     *,
-    expected_runtime_id: str,
+    expected_runtime_id: str | None = None,
     expected_generation_id: str | None = None,
     expected_request_id: str | None = None,
     expected_input_snapshot_hash: str | None = None,
     expected_seed: int | None = None,
     expected_language: Any | None = None,
     expected_source_size: tuple[int, int] | None = None,
-    expected_target_selection: Any = _UNSET,
+    expected_target_selection: Any = None,
     require_target_selection: bool = False,
 ) -> ValidatedBundle:
-    """Validate untrusted bytes once, then bind them to the durable DB job."""
+    if not isinstance(bundle, bytes) or not bundle or len(bundle) > MAX_BUNDLE_BYTES:
+        raise ArtifactContractError("ZIP size is invalid")
     try:
-        manifest = validate_core_bundle(bundle)
-    except CoreArtifactContractError as exc:
-        raise _reject(str(exc)) from exc
+        with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+            infos = archive.infolist()
+            names = [info.filename for info in infos]
+            allowed = REQUIRED_ARCHIVE_FILES | OPTIONAL_ARCHIVE_FILES
+            if len(names) != len(set(names)) or any(name not in allowed for name in names):
+                raise ArtifactContractError("ZIP contains unknown or duplicate members")
+            if not REQUIRED_ARCHIVE_FILES.issubset(names):
+                missing = sorted(REQUIRED_ARCHIVE_FILES.difference(names))
+                raise ArtifactContractError("ZIP is missing: " + ", ".join(missing))
+            total = sum(info.file_size for info in infos)
+            if total > MAX_UNCOMPRESSED_BYTES:
+                raise ArtifactContractError("ZIP uncompressed size is too large")
+            for info in infos:
+                if info.filename != info.filename.replace("\\", "/") or "/" in info.filename or ".." in info.filename:
+                    raise ArtifactContractError("ZIP member path is unsafe")
+                if info.flag_bits & 0x1:
+                    raise ArtifactContractError("encrypted ZIP members are forbidden")
+            members = {name: archive.read(name) for name in names}
+    except ArtifactContractError:
+        raise
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise ArtifactContractError("response is not a readable ZIP") from exc
 
-    if manifest.pipeline_version != PIPELINE_VERSION:
-        raise ArtifactContractError("Version de pipeline invalide.")
-    dependency_versions = {
-        dependency.name.casefold(): dependency.version
-        for dependency in manifest.dependencies
-    }
-    if set(dependency_versions) != (
-        set(EXPECTED_DEPENDENCIES) | RUNTIME_DEPENDENCY_NAMES
-    ) or any(
-        dependency_versions.get(name) != version
-        for name, version in EXPECTED_DEPENDENCIES.items()
+    copy = _strict_json(members["copy.json"], "copy.json")
+    _copy_contract(copy)
+    ocr = _strict_json(members["ocr.json"], "ocr.json")
+    manifest = _strict_json(members["manifest.json"], "manifest.json")
+    if manifest.get("pipeline_version") != PIPELINE_VERSION:
+        raise ArtifactContractError("unsupported Colab pipeline version")
+    if manifest.get("preserves_product_pixels") is not True:
+        raise ArtifactContractError("manifest does not prove product-pixel preservation")
+    for key, expected in (
+        ("runtime_id", expected_runtime_id),
+        ("generation_id", expected_generation_id),
+        ("request_id", expected_request_id),
+        ("input_snapshot_hash", expected_input_snapshot_hash),
+        ("seed", expected_seed),
     ):
-        raise ArtifactContractError("Versions de dépendances invalides.")
-    if manifest.models != EXPECTED_MODELS:
-        raise ArtifactContractError("Révisions de modèles invalides.")
+        if expected is not None and manifest.get(key) != expected:
+            raise ArtifactContractError(f"manifest {key} does not match the database request")
+    if expected_language is not None and manifest.get("language") not in {expected_language, getattr(expected_language, "value", None)}:
+        raise ArtifactContractError("manifest language does not match the request")
 
-    if manifest.runtime_id != expected_runtime_id:
-        raise ArtifactContractError("L'identité du runtime a changé.")
-    if expected_generation_id is not None and manifest.generation_id != expected_generation_id:
-        raise ArtifactContractError("Identité de génération invalide.")
-    if expected_request_id is not None and manifest.request_id != expected_request_id:
-        raise ArtifactContractError("Identité de requête invalide.")
-    if (
-        expected_input_snapshot_hash is not None
-        and manifest.input_snapshot_hash != expected_input_snapshot_hash
-    ):
-        raise ArtifactContractError("Empreinte de la demande invalide.")
-    if expected_seed is not None and manifest.seed != expected_seed:
-        raise ArtifactContractError("Seed du manifeste invalide.")
-    if (
-        expected_language is not None
-        and manifest.language.value != _language_value(expected_language)
-    ):
-        raise ArtifactContractError("Langue du manifeste invalide.")
-
-    if expected_target_selection is not _UNSET:
-        try:
-            expected_target = (
-                None
-                if expected_target_selection is None
-                else NormalizedBox.model_validate(expected_target_selection)
-            )
-        except ValidationError as exc:
-            raise ArtifactContractError("Sélection cible attendue invalide.") from exc
-        if manifest.target_selection != expected_target:
-            raise ArtifactContractError("Sélection cible du manifeste invalide.")
-    if require_target_selection and manifest.target_selection is None:
-        raise ArtifactContractError("Sélection cible automatique manquante.")
-
-    records = {record.name.value: record for record in manifest.artifacts}
-    if expected_source_size is not None:
-        for name in ("cutout.png", "mask.png"):
-            record = records[name]
-            if (record.width, record.height) != expected_source_size:
-                raise ArtifactContractError(
-                    "Le masque et le cutout doivent correspondre à l'image source."
-                )
-
-    # The canonical validator has already rejected alternate names, ordering,
-    # traversal, duplicates, symlinks, ZIP bombs, invalid media and bad checksums.
-    with zipfile.ZipFile(io.BytesIO(bundle), "r") as archive:
-        members = {name: archive.read(name) for name in ARTIFACT_ORDER}
-
-    try:
-        copy = CopyPayload.model_validate_json(members["copy.json"])
-    except ValidationError as exc:  # Defensive: the canonical validator also checks this.
-        raise ArtifactContractError("Schéma de copy.json invalide.") from exc
-
+    records: dict[str, dict[str, Any]] = {}
+    for name in sorted(REQUIRED_ARCHIVE_FILES | (OPTIONAL_ARCHIVE_FILES & set(members))):
+        if name.endswith((".jpg", ".png")):
+            records[name] = _image_record(name, members[name])
+        else:
+            records[name] = {
+                "name": name,
+                "mime": "application/json",
+                "sha256": hashlib.sha256(members[name]).hexdigest(),
+                "bytes": len(members[name]),
+                "width": None,
+                "height": None,
+            }
+    manifest = {**manifest, "artifacts": [records[name] for name in sorted(records)]}
     return ValidatedBundle(
-        manifest=manifest.model_dump(mode="json"),
-        copy=copy.model_dump(mode="json"),
+        manifest=manifest,
+        copy=copy,
+        ocr=ocr,
         members=members,
+        records=records,
         checksum=hashlib.sha256(bundle).hexdigest(),
     )
