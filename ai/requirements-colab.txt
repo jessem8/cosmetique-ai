@@ -8,7 +8,6 @@ diffusers
 transformers
 accelerate
 safetensors
-torch
 ollama
 fastapi
 uvicorn
