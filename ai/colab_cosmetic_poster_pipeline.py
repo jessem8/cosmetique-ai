@@ -543,7 +543,11 @@ def runtime_ready() -> bool:
         if not torch.cuda.is_available():
             return False
         tags = ollama.Client(host=OLLAMA_HOST).list()
-        models = tags.get("models", []) if isinstance(tags, Mapping) else []
+        models = (
+            tags.get("models", [])
+            if isinstance(tags, Mapping)
+            else getattr(tags, "models", [])
+        )
         wanted = OLLAMA_MODEL.split(":", 1)[0].casefold()
         return any(
             str(item.get("name", "")).split(":", 1)[0].casefold() == wanted
