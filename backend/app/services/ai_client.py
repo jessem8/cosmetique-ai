@@ -40,7 +40,7 @@ class HealthContract(RemoteModel):
     status: str = Field(min_length=1, max_length=32)
     ready: bool
     runtime_id: str = Field(min_length=1, max_length=200)
-    pipeline_version: str = Field(pattern=r"^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    pipeline_version: str = Field(pattern=r"^[0-9]+\.[0-9]+\.[0-9]+$")
     gpu: bool | dict[str, Any]
 
 
