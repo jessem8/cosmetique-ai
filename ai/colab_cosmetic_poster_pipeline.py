@@ -52,7 +52,15 @@ SDXL_INPAINT_MODEL = os.getenv(
 )
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_K_M")
-PIPELINE_VERSION = "1.1.3"
+OLLAMA_FALLBACK_MODELS = tuple(
+    model.strip()
+    for model in os.getenv(
+        "OLLAMA_FALLBACK_MODELS",
+        "qwen3:8b,mistral:7b-instruct",
+    ).split(",")
+    if model.strip()
+)
+PIPELINE_VERSION = "1.1.4"
 RUNTIME_ID = os.getenv("COLAB_RUNTIME_ID", f"colab-runtime-{os.getpid()}")
 
 CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -435,33 +443,43 @@ La valeur _meta.source doit être exactement la chaîne "ocr+metadata".
     )
 
     client = Client(host=OLLAMA_HOST)
-    last_error: Exception | None = None
-    for attempt in range(2):
-        try:
-            response = client.chat(
-                model=OLLAMA_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                format=_COPY_SCHEMA,
-                stream=False,
-                options={"temperature": 0, "seed": 42},
-            )
-            raw = _ollama_content(response)
-            payload = json.loads(raw)
-            return validate_marketing_copy(payload, ocr_text, metadata)
-        except Exception as exc:
-            last_error = exc
-            user_prompt += (
-                f"\nLa réponse précédente était invalide ({exc}). "
-                "Réponds à nouveau avec tous les champs obligatoires non vides, sans texte hors JSON. "
-                "Pour cta, utilise exactement 'Découvrir' si nécessaire."
-            )
-            if attempt == 0:
-                continue
+    configured_models = tuple(
+        dict.fromkeys((OLLAMA_MODEL, *OLLAMA_FALLBACK_MODELS))
+    )
+    errors: list[str] = []
 
-    raise PipelineError(f"Qwen/Ollama did not produce valid copy: {last_error}")
+    for model in configured_models:
+        model_prompt = user_prompt
+        for attempt in range(2):
+            try:
+                response = client.chat(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": model_prompt},
+                    ],
+                    format=_COPY_SCHEMA,
+                    stream=False,
+                    think=False,
+                    options={"temperature": 0, "seed": 42, "num_ctx": 4096},
+                )
+                raw = _ollama_content(response)
+                payload = json.loads(raw)
+                return validate_marketing_copy(payload, ocr_text, metadata)
+            except Exception as exc:
+                errors.append(f"{model} attempt {attempt + 1}: {exc}")
+                model_prompt += (
+                    f"\nLa réponse précédente était invalide ({exc}). "
+                    "Réponds à nouveau avec tous les champs obligatoires non vides, sans texte hors JSON. "
+                    "Pour cta, utilise exactement 'Découvrir' si nécessaire."
+                )
+
+    tried = ", ".join(configured_models) or "(none)"
+    detail = " | ".join(errors[-4:]) or "no response"
+    raise PipelineError(
+        f"Qwen/Ollama did not produce valid copy. Tried models: {tried}. "
+        f"Last errors: {detail}"
+    )
 
 
 def _image_from_bytes(value: bytes) -> Image.Image:
@@ -510,6 +528,7 @@ def generate_campaign_zip(
             "ocr": "PaddleOCR-lang-fr",
             "background_generation": SDXL_INPAINT_MODEL,
             "copy_generation": OLLAMA_MODEL,
+            "copy_generation_fallbacks": list(OLLAMA_FALLBACK_MODELS),
         },
         "seed": seed,
         "preserves_product_pixels": True,
@@ -564,14 +583,17 @@ def runtime_ready() -> bool:
             if isinstance(tags, Mapping)
             else getattr(tags, "models", [])
         )
-        wanted = OLLAMA_MODEL.split(":", 1)[0].casefold()
+        wanted = {
+            name.split(":", 1)[0].casefold()
+            for name in (OLLAMA_MODEL, *OLLAMA_FALLBACK_MODELS)
+        }
         return any(
             str(
                 item.get("name", "")
                 if isinstance(item, Mapping)
                 else getattr(item, "model", getattr(item, "name", ""))
             ).split(":", 1)[0].casefold()
-            == wanted
+            in wanted
             for item in models
         )
     except Exception:
