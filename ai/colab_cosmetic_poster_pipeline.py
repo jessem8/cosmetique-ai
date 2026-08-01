@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import hmac
 import io
 import json
 import os
@@ -532,10 +533,24 @@ def generate_text_only(
 
 
 def create_app() -> Any:
-    from fastapi import FastAPI, File, Form, UploadFile
-    from fastapi.responses import Response
+    from fastapi import FastAPI, File, Form, Request, UploadFile
+    from fastapi.responses import JSONResponse, Response
 
     app = FastAPI(title="Cosmetic AI Colab Service", version=PIPELINE_VERSION)
+    runtime_token = os.getenv("COLAB_AI_TOKEN", os.getenv("AI_SERVICE_TOKEN", "")).strip()
+
+    @app.middleware("http")
+    async def authenticate(request: Request, call_next: Any) -> Any:
+        if runtime_token and request.url.path in {"/health", "/generate-campaign", "/generate-text"}:
+            supplied = request.headers.get("authorization", "")
+            expected = f"Bearer {runtime_token}"
+            if not hmac.compare_digest(supplied, expected):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Colab bearer authentication failed"},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        return await call_next(request)
 
     @app.get("/health")
     def health() -> dict[str, Any]:
