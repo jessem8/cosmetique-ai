@@ -1,0 +1,16 @@
+# Google Colab GPU runtime dependencies for the canonical pipeline
+Pillow>=10
+rembg
+onnxruntime-gpu
+paddleocr
+paddlepaddle
+diffusers
+transformers
+accelerate
+safetensors
+torch
+ollama
+fastapi
+uvicorn
+python-multipart
+pyngrok
