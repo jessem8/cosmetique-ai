@@ -19,6 +19,8 @@ def test_client_health_and_campaign_use_colab_endpoints() -> None:
                     "runtime_id": "runtime-test",
                     "pipeline_version": "1.1.0",
                     "gpu": True,
+                    "sdxl_model": "diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
+                    "ollama_model": "qwen2.5:7b-instruct-q4_K_M",
                 },
             )
         if request.url.path == "/generate-campaign":
