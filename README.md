@@ -86,5 +86,5 @@ notebook/   canonical Colab runner
 backend/    website API, queue worker, ZIP validation, private storage
 frontend/   existing product interface
 docker/     PostgreSQL, API, worker, and frontend Compose stack
-ai_core/    legacy contract package retained only for backend compatibility
+ai_core/    schema-only compatibility package for the website backend
 ```
