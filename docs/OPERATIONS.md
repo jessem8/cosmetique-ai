@@ -27,22 +27,15 @@ production hosting.
 
 1. Open the production notebook in `notebook/` with Google Colab.
 2. Select a T4 GPU runtime.
-3. Set a fresh high-entropy API bearer token in the notebook's protected
-   configuration. Do not put the token in a committed cell.
+3. Add `NGROK_AUTHTOKEN` to Colab Secrets; the notebook creates a separate
+   temporary bearer token for the service.
 4. Choose **Runtime → Run all**.
-5. Wait for the authenticated health check to report `ready: true`.
-6. Copy the generated `https://*.ngrok-free.app` URL and the bearer token
-   into the local `docker/.env`.
+5. Wait for the health check to report `ready: true`.
+6. Copy the generated ngrok URL and `COLAB_AI_TOKEN` into the local
+   `docker/.env` as `COLAB_AI_URL` and `AI_SERVICE_TOKEN`.
 
-The notebook launches the tunnel with the documented ngrok tunnel form:
-
-```text
-cloudflared tunnel --url http://localhost:<service-port>
-```
-
-ngrok tunnels use a random URL, have no uptime guarantee, do not support
-server-sent events, and may return `429` after 200 concurrent in-flight requests.
-Cosmetique AI uses bounded polling and one GPU job at a time.
+The final notebook cell starts ngrok for the local FastAPI service on port 8000.
+Only one GPU campaign is executed at a time.
 
 ## Configure the local stack
 
