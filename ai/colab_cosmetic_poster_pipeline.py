@@ -424,6 +424,7 @@ Retourne uniquement l'objet JSON demandé.
 Le champ titre doit être une ligne créative courte.
 Le sous_titre et les bullets ne peuvent utiliser que des informations compatibles avec le texte OCR.
 N'invente aucune promesse médicale, clinique, dermatologique, aucun résultat chiffré absent de l'étiquette et aucun ingrédient absent.
+La valeur _meta.source doit être exactement la chaîne "ocr+metadata".
 """
     system_prompt = (
         "Tu es un copywriter cosmétique senior. Réponds uniquement avec un JSON conforme au schéma. "
