@@ -1,23 +1,10 @@
-"""CPU-safe contracts and deterministic artifact tooling for Cosmetique AI."""
+"""Compatibility schemas used by the model-free website worker.
 
-from .artifacts import build_manifest, create_bundle, validate_bundle
-from .claims import EvidenceLedger, assemble_copy_payload, validate_copy_payload
-from .composition import compose_campaign_assets, render_campaign_copy
-from .orchestrator import PipelineOrchestrator
-from .schemas import GenerationRequest, Manifest
+The executable AI pipeline lives in the top-level ai/ package and runs in
+Colab. This package intentionally exposes only shared database/API schemas.
+"""
 
-__all__ = [
-    "EvidenceLedger",
-    "GenerationRequest",
-    "Manifest",
-    "PipelineOrchestrator",
-    "assemble_copy_payload",
-    "build_manifest",
-    "compose_campaign_assets",
-    "create_bundle",
-    "render_campaign_copy",
-    "validate_bundle",
-    "validate_copy_payload",
-]
+from .schemas import CandidateBox, PipelineSnapshot, ProductSnapshot
 
-__version__ = "0.1.0"
+__all__ = ["CandidateBox", "PipelineSnapshot", "ProductSnapshot"]
+__version__ = "0.2.0"
