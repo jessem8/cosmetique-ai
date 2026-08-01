@@ -52,7 +52,7 @@ SDXL_INPAINT_MODEL = os.getenv(
 )
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_K_M")
-PIPELINE_VERSION = "1.1.1"
+PIPELINE_VERSION = "1.1.2"
 RUNTIME_ID = os.getenv("COLAB_RUNTIME_ID", f"colab-runtime-{os.getpid()}")
 
 CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -180,8 +180,15 @@ def read_product_label(image: Image.Image) -> dict[str, Any]:
     # PaddleOCR 3.x enables oneDNN by default on CPU. Colab's preloaded
     # PaddlePaddle build can fail in that path, so keep OCR on the stable CPU
     # kernel while SDXL uses the CUDA runtime separately.
-    os.environ.setdefault("FLAGS_use_mkldnn", "0")
+    os.environ["FLAGS_use_mkldnn"] = "0"
+    os.environ["FLAGS_use_onednn"] = "0"
     try:
+        import paddle
+        for flag in ("FLAGS_use_mkldnn", "FLAGS_use_onednn"):
+            try:
+                paddle.set_flags({flag: False})
+            except Exception:
+                pass
         import numpy as np
         from paddleocr import PaddleOCR
     except ImportError as exc:
