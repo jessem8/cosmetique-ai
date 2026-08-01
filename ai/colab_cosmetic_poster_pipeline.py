@@ -550,9 +550,13 @@ def runtime_ready() -> bool:
         )
         wanted = OLLAMA_MODEL.split(":", 1)[0].casefold()
         return any(
-            str(item.get("name", "")).split(":", 1)[0].casefold() == wanted
+            str(
+                item.get("name", "")
+                if isinstance(item, Mapping)
+                else getattr(item, "model", getattr(item, "name", ""))
+            ).split(":", 1)[0].casefold()
+            == wanted
             for item in models
-            if isinstance(item, Mapping)
         )
     except Exception:
         return False
