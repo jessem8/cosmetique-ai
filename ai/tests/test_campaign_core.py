@@ -24,6 +24,22 @@ def test_inpaint_prompt_forbids_repainting_packaging() -> None:
         assert forbidden in prompt
 
 
+def test_copy_source_spacing_is_canonicalized() -> None:
+    copy = {
+        "brand": "Rexona",
+        "product_name": "Shower Fresh",
+        "category": "deodorant",
+        "titre": "Fraîcheur au quotidien",
+        "sous_titre": "Une sensation propre et légère.",
+        "bullets": [],
+        "cta": "Découvrir",
+        "hashtags": [],
+        "_meta": {"ocr_text": "Rexona Shower Fresh", "source": "OCR + metadata"},
+    }
+    checked = validate_marketing_copy(copy, copy["_meta"]["ocr_text"], {"brand": "Rexona"})
+    assert checked["_meta"]["source"] == "ocr+metadata"
+
+
 def test_rendered_assets_have_exact_platform_dimensions() -> None:
     background = Image.new("RGB", (1024, 1024), (220, 235, 235))
     product = Image.new("RGBA", (220, 480), (20, 100, 140, 255))

@@ -171,9 +171,14 @@ def validate_marketing_copy(
             raise CopyContractError(f"unsupported claim: {term}")
 
     normalized["_meta"]["ocr_text"] = normalize_ocr_text(ocr_text)
-    normalized["_meta"]["source"] = normalized["_meta"].get("source", "ocr+metadata")
-    if normalized["_meta"]["source"] != "ocr+metadata":
+    raw_source = normalize_ocr_text(str(normalized["_meta"].get("source", "ocr+metadata"))).casefold()
+    canonical_source = raw_source.replace(" ", "")
+    if canonical_source != "ocr+metadata":
         raise CopyContractError("copy source must be ocr+metadata")
+    # The source marker is contract metadata, not creative copy. Canonicalize
+    # harmless casing/spacing variants returned by the language model while
+    # keeping the ZIP contract exact for backend validation.
+    normalized["_meta"]["source"] = "ocr+metadata"
     if not normalized["_meta"]["ocr_text"] and not metadata:
         raise CopyContractError("copy has no OCR or metadata evidence")
 
