@@ -532,6 +532,28 @@ def generate_text_only(
     return generate_marketing_copy(ocr, supplied, tone)
 
 
+def runtime_ready() -> bool:
+    """Check the non-GPU prerequisites before Docker treats Colab as healthy."""
+    try:
+        import torch
+        import rembg  # noqa: F401
+        import paddleocr  # noqa: F401
+        import diffusers  # noqa: F401
+        import ollama
+        if not torch.cuda.is_available():
+            return False
+        tags = ollama.Client(host=OLLAMA_HOST).list()
+        models = tags.get("models", []) if isinstance(tags, Mapping) else []
+        wanted = OLLAMA_MODEL.split(":", 1)[0].casefold()
+        return any(
+            str(item.get("name", "")).split(":", 1)[0].casefold() == wanted
+            for item in models
+            if isinstance(item, Mapping)
+        )
+    except Exception:
+        return False
+
+
 def create_app() -> Any:
     from fastapi import FastAPI, File, Form, Request, UploadFile
     from fastapi.responses import JSONResponse, Response
@@ -561,7 +583,7 @@ def create_app() -> Any:
         return {
             "status": "ok",
             "gpu": gpu,
-            "ready": gpu,
+            "ready": bool(gpu and runtime_ready()),
             "runtime_id": RUNTIME_ID,
             "pipeline_version": PIPELINE_VERSION,
             "sdxl_model": SDXL_INPAINT_MODEL,
