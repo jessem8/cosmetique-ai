@@ -24,7 +24,7 @@ from typing import Any, Mapping
 
 from PIL import Image, ImageOps
 
-try:
+if __package__:
     from .campaign_core import (
         FORMATS,
         build_campaign_zip,
@@ -34,7 +34,7 @@ try:
         render_poster,
         validate_marketing_copy,
     )
-except ImportError:
+else:
     from campaign_core import (
         FORMATS,
         build_campaign_zip,
