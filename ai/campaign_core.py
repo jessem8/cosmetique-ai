@@ -335,12 +335,31 @@ def render_poster(
         y = _draw_wrapped(draw, " ".join(bullet_lines), (padding + 22, y), bullet_font, "#334E68", max_text_width - 22, 5)
         y += 5
 
-    cta_font = _load_font(22 if is_landscape else 24, "bold")
     cta_width = min(max_text_width, 260 if is_landscape else 300)
     cta_height = 54 if is_landscape else 60
-    cta_y = min(y + 16, height - padding - cta_height)
-    draw.rounded_rectangle((padding, cta_y, padding + cta_width, cta_y + cta_height), radius=16, fill="#17315E")
-    draw.text((padding + cta_width // 2, cta_y + cta_height // 2), copy["cta"].upper(), font=cta_font, fill="white", anchor="mm")
+    cta_y = y + 16
+    if cta_y + cta_height > height - padding:
+        raise ValueError(f"copy does not fit the {platform} safe area")
+    cta_text = copy["cta"].upper()
+    cta_font = _fit_font(
+        draw,
+        cta_text,
+        max(1, cta_width - 32),
+        22 if is_landscape else 24,
+        "bold",
+    )
+    draw.rounded_rectangle(
+        (padding, cta_y, padding + cta_width, cta_y + cta_height),
+        radius=16,
+        fill="#17315E",
+    )
+    draw.text(
+        (padding + cta_width // 2, cta_y + cta_height // 2),
+        cta_text,
+        font=cta_font,
+        fill="white",
+        anchor="mm",
+    )
 
     return canvas.convert("RGB")
 
