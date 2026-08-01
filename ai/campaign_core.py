@@ -366,7 +366,17 @@ def render_poster(
 
 def _image_bytes(image: Image.Image, format_name: str) -> bytes:
     output = io.BytesIO()
-    image.convert("RGB").save(output, format=format_name, quality=95, optimize=True)
+    if format_name == "PNG":
+        if image.mode not in {"RGBA", "L"}:
+            image = image.convert("RGBA")
+        image.save(output, format="PNG", optimize=True)
+    else:
+        image.convert("RGB").save(
+            output,
+            format=format_name,
+            quality=95,
+            optimize=True,
+        )
     return output.getvalue()
 
 
