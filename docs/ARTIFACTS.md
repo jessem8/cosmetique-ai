@@ -3,57 +3,52 @@
 The worker accepts a campaign only after validating the complete ZIP as one
 atomic result. Partial assets are never promoted as a successful generation.
 
-## Exact bundle
-
-The ZIP contains these eight root-level members exactly once:
+## Required members
 
 ```text
 instagram.jpg
 facebook.jpg
 linkedin.jpg
 copy.json
-cutout.png
-mask.png
-background.jpg
+ocr.json
 manifest.json
 ```
 
-Directories, duplicate names, path traversal, alternate separators, symlinks,
-encryption, extra fields, nested archives, suspicious compression ratios, and
-oversized members are rejected before extraction.
+Optional diagnostic members are accepted when present:
+
+```text
+cutout.png
+mask.png
+background.jpg
+```
+
+All members must be root-level, unique, unencrypted, under the size limits, and
+free of path traversal or unknown filenames.
 
 ## Images
 
 - `instagram.jpg`: RGB JPEG, exactly 1080×1080.
 - `facebook.jpg`: RGB JPEG, exactly 1200×630.
 - `linkedin.jpg`: RGB JPEG, exactly 1200×627.
-- `cutout.png`: RGBA product cutout at the EXIF-corrected source dimensions.
-- `mask.png`: single-channel accepted mask at the same dimensions.
-- `background.jpg`: generated background without the source product.
+- `cutout.png`: RGBA PNG.
+- `mask.png`: single-channel L PNG.
+- `background.jpg`: RGB JPEG, exactly 1024×1024.
 
-The source product is never regenerated. Platform finals are deterministic
-compositions of the accepted cutout and generated background. Product pixels
-inside the eroded accepted mask must match the source.
+The source product is removed with rembg and composited back after SDXL
+inpainting. The manifest must state `preserves_product_pixels: true`.
 
-## Copy
+## Copy and OCR
 
-`copy.json` contains exactly one campaign language and independent Instagram,
-Facebook, and LinkedIn copy. Every rendered marketing claim carries evidence
-references into the verified input ledger. The payload is rejected if it
-contains malformed JSON, unknown fields, unsupported facts, or unsafe claims.
+`copy.json` must match the strict copy contract and contain OCR evidence in
+`_meta.ocr_text`. Placeholder copy and unsupported clinical/medical claims
+are rejected.
+
+`ocr.json` contains the normalized label text and confidence items. It is
+stored with the generation metadata for traceability.
 
 ## Manifest
 
-`manifest.json` binds the result to:
-
-- generation, request, and runtime IDs;
-- canonical immutable-input hash, seed, language, and target selection;
-- pinned dependencies and exact Hugging Face repository revisions;
-- an ordered completion receipt for every real pipeline stage;
-- MIME type, byte length, SHA-256, dimensions, and semantic role for each of the
-  seven non-manifest artifacts.
-
-The website validates each member against the manifest, computes a separate
-SHA-256 for the final ZIP, and atomically stores the validated bundle. Browser
-artifact routes are allowlisted and authenticated.
-
+`manifest.json` binds the result to the pipeline version, runtime ID,
+generation/request IDs, immutable input hash, language, seed, selected models,
+and the product-pixel preservation flag. The backend compares request identity
+before installing any asset.
