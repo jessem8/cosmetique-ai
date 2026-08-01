@@ -285,7 +285,11 @@ class GenerationWorker:
         installed: GenerationInstall = storage.install_generation(
             str(generation_id), bundle, validated.members
         )
-        records = validated.records
+        records = getattr(
+            validated,
+            "records",
+            {item["name"]: item for item in validated.manifest.get("artifacts", [])},
+        )
 
         try:
             with SessionLocal() as db, db.begin():
