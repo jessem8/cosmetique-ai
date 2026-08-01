@@ -33,7 +33,8 @@ class AIProtocolError(AIClientError):
 
 
 class RemoteModel(BaseModel):
-    # Colab may add informational model fields without breaking the stable contract.\n    model_config = ConfigDict(extra="ignore")
+    # Colab may add informational model fields without breaking the stable contract.
+    model_config = ConfigDict(extra="ignore")
 
 
 class HealthContract(RemoteModel):
