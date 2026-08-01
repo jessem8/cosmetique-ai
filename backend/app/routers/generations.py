@@ -27,6 +27,7 @@ from app.schemas import (
 )
 from app.services.ai_client import AIClient, AIClientError
 from app.services.artifacts import ARTIFACT_NAMES
+from app.services.copy_projection import project_copy_for_browser
 from app.services.generation_jobs import (
     IdempotencyConflict,
     decode_cursor,
@@ -158,7 +159,7 @@ def generation_out(generation: Generation) -> GenerationOut:
         error=error,
         ambiguity=ambiguity,
         copy=(
-            generation.copy_json
+            project_copy_for_browser(generation.copy_json)
             if generation.status == GenerationStatus.DONE
             else None
         ),
