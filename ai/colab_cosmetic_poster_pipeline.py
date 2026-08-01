@@ -52,7 +52,7 @@ SDXL_INPAINT_MODEL = os.getenv(
 )
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_K_M")
-PIPELINE_VERSION = "1.1.2"
+PIPELINE_VERSION = "1.1.3"
 RUNTIME_ID = os.getenv("COLAB_RUNTIME_ID", f"colab-runtime-{os.getpid()}")
 
 CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -70,14 +70,14 @@ _COPY_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "brand": {"type": "string"},
-        "product_name": {"type": "string"},
-        "category": {"type": "string"},
-        "titre": {"type": "string"},
-        "sous_titre": {"type": "string"},
-        "bullets": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
-        "cta": {"type": "string"},
-        "hashtags": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
+        "brand": {"type": "string", "minLength": 1},
+        "product_name": {"type": "string", "minLength": 1},
+        "category": {"type": "string", "minLength": 1},
+        "titre": {"type": "string", "minLength": 1},
+        "sous_titre": {"type": "string", "minLength": 1},
+        "bullets": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 3},
+        "cta": {"type": "string", "minLength": 1, "enum": ["Découvrir", "Adopter", "Essayer", "En savoir plus"]},
+        "hashtags": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 5},
         "_meta": {
             "type": "object",
             "properties": {
@@ -424,12 +424,14 @@ Retourne uniquement l'objet JSON demandé.
 Le champ titre doit être une ligne créative courte.
 Le sous_titre et les bullets ne peuvent utiliser que des informations compatibles avec le texte OCR.
 N'invente aucune promesse médicale, clinique, dermatologique, aucun résultat chiffré absent de l'étiquette et aucun ingrédient absent.
+Tous les champs texte obligatoires doivent être non vides. Le CTA doit être un appel à l'action court; si tu hésites, utilise exactement "Découvrir".
 La valeur _meta.source doit être exactement la chaîne "ocr+metadata".
 """
     system_prompt = (
         "Tu es un copywriter cosmétique senior. Réponds uniquement avec un JSON conforme au schéma. "
         "Les textes doivent être courts, élégants et lisibles sur mobile. "
-        "Ne produis jamais de marque ou de produit de démonstration."
+        "Ne produis jamais de marque ou de produit de démonstration. "
+        "Ne laisse jamais un champ texte obligatoire vide; le CTA doit être non vide."
     )
 
     client = Client(host=OLLAMA_HOST)
@@ -453,7 +455,8 @@ La valeur _meta.source doit être exactement la chaîne "ocr+metadata".
             last_error = exc
             user_prompt += (
                 f"\nLa réponse précédente était invalide ({exc}). "
-                "Réponds à nouveau avec les champs obligatoires, sans texte hors JSON."
+                "Réponds à nouveau avec tous les champs obligatoires non vides, sans texte hors JSON. "
+                "Pour cta, utilise exactement 'Découvrir' si nécessaire."
             )
             if attempt == 0:
                 continue
