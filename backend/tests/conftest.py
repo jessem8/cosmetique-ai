@@ -10,6 +10,6 @@ os.environ.setdefault(
 )
 os.environ.setdefault("SECRET_KEY", "test-only-secret-key-with-at-least-32-bytes")
 os.environ.setdefault("ARTIFACT_ROOT", "test-artifacts")
-os.environ.setdefault("AI_SERVICE_URL", "https://ai-runtime.test")
+os.environ.setdefault("COLAB_AI_URL", "https://ai-runtime.test")
 os.environ.setdefault("AI_SERVICE_TOKEN", "test-only-ai-token-with-at-least-32-bytes")
 
