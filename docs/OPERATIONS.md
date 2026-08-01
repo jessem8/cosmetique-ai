@@ -2,7 +2,7 @@
 
 This runbook covers the V1 deployment: a private local Docker application using
 an authenticated, session-based Google Colab GPU service. A Colab runtime and a
-Quick Tunnel are temporary infrastructure; neither is treated as always-on
+ngrok tunnel are temporary infrastructure; neither is treated as always-on
 production hosting.
 
 ## Trust boundaries
@@ -31,16 +31,16 @@ production hosting.
    configuration. Do not put the token in a committed cell.
 4. Choose **Runtime → Run all**.
 5. Wait for the authenticated health check to report `ready: true`.
-6. Copy the generated `https://*.trycloudflare.com` URL and the bearer token
+6. Copy the generated `https://*.ngrok-free.app` URL and the bearer token
    into the local `docker/.env`.
 
-The notebook launches the tunnel with the documented Quick Tunnel form:
+The notebook launches the tunnel with the documented ngrok tunnel form:
 
 ```text
 cloudflared tunnel --url http://localhost:<service-port>
 ```
 
-Quick Tunnels use a random URL, have no uptime guarantee, do not support
+ngrok tunnels use a random URL, have no uptime guarantee, do not support
 server-sent events, and may return `429` after 200 concurrent in-flight requests.
 Cosmetique AI uses bounded polling and one GPU job at a time.
 
@@ -95,7 +95,7 @@ successful campaign.
 1. Start a new T4 runtime and run the notebook from the top.
 2. Create a new bearer token.
 3. Wait for the new runtime health response and note its new runtime ID.
-4. Update only `AI_SERVICE_URL` and `AI_SERVICE_TOKEN` in `docker/.env`.
+4. Update only `COLAB_AI_URL` and `AI_SERVICE_TOKEN` in `docker/.env`.
 5. Recreate the backend and worker:
 
    ```powershell
