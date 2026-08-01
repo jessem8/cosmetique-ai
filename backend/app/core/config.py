@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     COLAB_AI_URL: str = ""
     AI_SERVICE_TOKEN: str = ""
     AI_CONNECT_TIMEOUT_SECONDS: float = Field(default=5.0, ge=0.5, le=30)
-    AI_READ_TIMEOUT_SECONDS: float = Field(default=30.0, ge=1, le=120)
+    AI_READ_TIMEOUT_SECONDS: float = Field(default=600.0, ge=1, le=1800)
     AI_HEALTH_TIMEOUT_SECONDS: float = Field(default=5.0, ge=0.5, le=15)
 
     WORKER_ID: str = "worker-1"
