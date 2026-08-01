@@ -1,166 +1,90 @@
 # Cosmetique AI
 
-Private, reproducible product-ad studio for cosmetics and personal care.
-Cosmetique AI preserves the photographed product, generates only the background,
-and exports a complete evidence-bound campaign for Instagram, Facebook, and
-LinkedIn.
+Colab-first cosmetic campaign generation for product photos. The photographed
+product is removed with rembg, its label is read with PaddleOCR, a category-aware
+SDXL inpainting scene is generated around the preserved product, and all copy is
+rendered deterministically with Pillow.
 
-## What V1 delivers
+## Canonical pipeline
 
-- A French React interface with one French or English campaign per generation.
-- Exact RGB JPEG exports: Instagram `1080×1080`, Facebook `1200×630`, and
-  LinkedIn `1200×627`.
-- Platform-specific copy constrained to the product facts supplied by the user.
-- Evidence views for the original, mask, cutout, generated background, and final
-  composition.
-- A durable FastAPI/PostgreSQL job worker and private local artifact storage.
-- An authenticated asynchronous Colab GPU API exposed through a temporary
-  Cloudflare Quick Tunnel.
-- A strict eight-member ZIP with model revisions, stage receipts, dimensions,
-  MIME types, sizes, and checksums.
+The source of truth is:
 
-There is no fake progress, silent fallback, queue-position promise, or degraded
-result marked as successful.
+- `ai/colab_cosmetic_poster_pipeline.py`
+- `ai/campaign_core.py`
+- `notebook/pipeline_ia_cosmetique.ipynb`
 
-## Architecture
+The Google Drive clone and the Downloads notebook/ZIP are reference material.
+They are not the delivery target.
+
+Pipeline:
 
 ```text
-Browser
-  │ same-origin /api/v1
-  ▼
-Nginx ── FastAPI ── PostgreSQL queue
-                     │
-                     ▼
-                   Worker
-                     │ authenticated /v1 polling
-                     ▼
-             Colab T4 + Quick Tunnel
-                     │
-                     ▼
-            validated atomic ZIP bundle
-                     │
-                     ▼
-             persistent local volume
+image → EXIF normalization → PaddleOCR → rembg isnet-general-use
+      → SDXL Inpainting around preserved product → Qwen2.5 strict JSON
+      → Pillow typography → three platform exports → ZIP
 ```
 
-The browser never receives the Colab URL or bearer token. Colab receives image
-bytes and a validated request, never database or storage credentials.
+SDXL is forbidden from drawing text, logos, packaging, extra products, vases,
+fruit, people, hands, floating objects, or a generic magenta studio. The source
+product is composited back after generation and receives a deterministic contact
+shadow.
+
+## Output contract
+
+Each campaign ZIP contains:
+
+- `instagram.jpg` — 1080×1080
+- `facebook.jpg` — 1200×630
+- `linkedin.jpg` — 1200×627
+- `copy.json` — strict brand/product/category/titre/sous-titre/bullets/CTA/hashtags contract
+- `ocr.json` — OCR text and confidence values
+- `manifest.json` — models, category, seed, and product-pixel preservation flag
+
+Diagnostic cutout, mask, and background images may also be included.
+
+## Colab API
+
+Run the notebook on a Colab GPU runtime. It exposes:
+
+```text
+GET  /health
+POST /generate-campaign
+POST /generate-text
+```
+
+Set `NGROK_AUTHTOKEN` before running the final notebook cell. The cell prints
+the temporary ngrok URL and a generated `COLAB_AI_TOKEN`; copy both into the
+Docker environment as `COLAB_AI_URL` and `AI_SERVICE_TOKEN`.
+
+## Website and Docker
+
+Docker remains model-free. The existing FastAPI/PostgreSQL worker uploads the
+product to Colab, validates the returned ZIP, stores the assets in its private
+artifact volume, and exposes the existing frontend asset URLs. When Colab is
+missing or unavailable, the generation becomes an explicit error.
+
+```powershell
+docker compose --env-file .\\docker\\.env -f .\\docker\\docker-compose.yml config
+docker compose --env-file .\\docker\\.env -f .\\docker\\docker-compose.yml up --build -d
+```
+
+The database and worker were retained to avoid a schema/frontend rewrite; no
+local AI fallback is used.
+
+## Verification
+
+Run focused Python tests for `ai/` and `backend/`, validate the notebook with
+`nbformat.validate`, and run `docker compose config`. GPU acceptance is
+performed in Colab using real dataset images, including Rexona and Lancôme, then
+the website is tested with a different arbitrary image.
 
 ## Repository layout
 
 ```text
-ai_core/   Installable AI pipeline, lazy adapters, Colab API, validation, tests
-backend/   FastAPI API, PostgreSQL models, worker, private storage, migrations
-frontend/  React 18 / Vite French product interface
-notebook/  Fresh-T4 Run-all Colab notebook
-docker/    PostgreSQL, migration, API, worker, Nginx/frontend Compose stack
-data/      Private-evaluation templates; authorized images remain ignored
-docs/      Operations, evaluation, artifact, and security runbooks
+ai/         canonical Colab pipeline and deterministic rendering
+notebook/   canonical Colab runner
+backend/    website API, queue worker, ZIP validation, private storage
+frontend/   existing product interface
+docker/     PostgreSQL, API, worker, and frontend Compose stack
+ai_core/    legacy contract package retained only for backend compatibility
 ```
-
-## Start locally
-
-1. Start the authenticated Colab service and obtain its temporary Quick Tunnel
-   URL and bearer token.
-2. Copy `docker/.env.example` to the ignored `docker/.env`.
-3. Replace every required value with a unique high-entropy secret.
-4. From the repository root:
-
-   ```powershell
-   docker compose --env-file .\docker\.env -f .\docker\docker-compose.yml config
-   docker compose --env-file .\docker\.env -f .\docker\docker-compose.yml up --build -d
-   docker compose --env-file .\docker\.env -f .\docker\docker-compose.yml ps
-   ```
-
-5. Open `http://localhost:<APP_PORT>`.
-
-Full launch, verification, runtime-loss recovery, shutdown, and troubleshooting
-instructions are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
-
-## Development checks
-
-AI core:
-
-```powershell
-cd ai_core
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[test]"
-.\.venv\Scripts\python.exe -m pytest -q
-```
-
-Backend:
-
-```powershell
-cd backend
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m pytest -q
-```
-
-Frontend:
-
-```powershell
-cd frontend
-npm ci
-npm run lint
-npm run test:run
-npm run build
-npm run test:e2e
-```
-
-GPU model imports are lazy; CPU contract tests do not download or load model
-weights.
-
-## API surface
-
-Website API:
-
-```text
-POST /api/v1/products
-GET  /api/v1/products/{product_id}/image
-POST /api/v1/products/{product_id}/generations
-GET  /api/v1/generations/{id}
-GET  /api/v1/generations/{id}/bundle
-GET  /api/v1/generations/{id}/artifacts/{artifact_name}
-GET  /api/v1/generations?cursor=&limit=
-```
-
-Authenticated Colab API:
-
-```text
-GET  /v1/health
-POST /v1/jobs
-GET  /v1/jobs/{id}
-GET  /v1/jobs/{id}/bundle
-```
-
-Generation creation requires an opaque `Idempotency-Key`. The lifecycle is
-`pending → processing → done | error`, with only objectively completed stages
-reported.
-
-## Model policy
-
-- Grounding DINO Tiny for candidate detection.
-- SAM Base for segmentation.
-- SDXL Base for the background only.
-- Qwen 2.5 7B Instruct in 4-bit for structured copy after SDXL unload.
-- BiRefNet disabled by default and allowed only as a reviewed, pinned crop-level
-  fallback.
-- No RMBG-2.0 default, fine-tuning, or LoRA in V1.
-
-Every production model revision is pinned and written into the manifest.
-
-## Documentation
-
-- [Operations and Colab recovery](docs/OPERATIONS.md)
-- [V1 API contract](docs/API.md)
-- [Private evaluation protocol](docs/EVALUATION.md)
-- [Artifact and manifest contract](docs/ARTIFACTS.md)
-- [Security and privacy operations](SECURITY.md)
-
-## Release truth
-
-A gate is accepted only with execution evidence. In particular, a fresh Colab
-T4 **Run all**, the authorized 24-image private evaluation, provider-side
-credential rotation, and the private GitHub push are never inferred from local
-unit tests.
