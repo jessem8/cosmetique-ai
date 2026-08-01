@@ -156,7 +156,7 @@ class GenerationWorker:
 
     def _new_client(self) -> AIClient:
         return AIClient(
-            base_url=settings.AI_SERVICE_URL,
+            base_url=settings.COLAB_AI_URL,
             token=settings.AI_SERVICE_TOKEN,
             timeout_seconds=settings.AI_READ_TIMEOUT_SECONDS,
         )
@@ -285,7 +285,7 @@ class GenerationWorker:
         installed: GenerationInstall = storage.install_generation(
             str(generation_id), bundle, validated.members
         )
-        records = {item["name"]: item for item in validated.manifest["artifacts"]}
+        records = validated.records
 
         try:
             with SessionLocal() as db, db.begin():
@@ -327,7 +327,13 @@ class GenerationWorker:
                 generation.status = GenerationStatus.DONE
                 generation.stage = GenerationStage.PACKAGING
                 generation.completed_stages = [stage.value for stage in GenerationStage]
-                generation.copy_json = validated.copy
+                generation.copy_json = {
+                    **validated.copy,
+                    "_meta": {
+                        **validated.copy.get("_meta", {}),
+                        "ocr": validated.ocr,
+                    },
+                }
                 generation.artifact_manifest = validated.manifest
                 generation.bundle_storage_key = installed.bundle_key
                 generation.bundle_checksum = validated.checksum
@@ -398,64 +404,28 @@ class GenerationWorker:
         generation = self._load(generation_id)
         try:
             image_bytes = storage.read_bytes(generation.product.original_storage_key)
+            filename = generation.product.original_storage_key.rsplit("/", 1)[-1] or "product.jpg"
             with self._new_client() as client:
                 health = client.health()
-                if not generation.runtime_id or health.runtime_id != generation.runtime_id:
-                    raise AIRuntimeLost("Le runtime de préflight a changé.")
-                runtime_id = generation.runtime_id
-                if generation.remote_job_id:
-                    remote_job_id = generation.remote_job_id
-                else:
-                    created = client.create_job(
-                        image_bytes=image_bytes,
-                        image_mime=generation.product.original_mime,
-                        request={
-                            "generation_id": str(generation.id),
-                            "request_id": generation.request_id,
-                            "input_snapshot_hash": generation.input_snapshot_hash,
-                            "input": remote_generation_input(
-                                generation.input_snapshot
-                            ),
-                        },
-                        expected_runtime_id=runtime_id,
-                    )
-                    remote_job_id = created.id
-                    self._set_remote_identity(
-                        generation_id, remote_job_id, runtime_id
-                    )
-
-                while True:
-                    deadline_start = generation.started_at or utcnow()
-                    if job_deadline_exceeded(
-                        deadline_start,
-                        utcnow(),
-                        settings.WORKER_JOB_DEADLINE_SECONDS,
-                    ):
-                        raise GenerationStaleError("Le job distant a dépassé sa limite.")
-                    remote = client.get_job(
-                        remote_job_id, expected_runtime_id=runtime_id
-                    )
-                    self.heartbeat(
-                        generation_id,
-                        stage=remote.stage,
-                        completed_stages=remote.completed_stages,
-                    )
-                    if remote.status == "done":
-                        bundle = client.download_bundle(
-                            remote_job_id, expected_runtime_id=runtime_id
-                        )
-                        self._install_success(generation, bundle, runtime_id)
-                        return
-                    if remote.status == "error":
-                        code = remote.error.code if remote.error else "REMOTE_PROTOCOL_ERROR"
-                        candidates = (
-                            browser_candidate_boxes(remote.ambiguity)
-                            if remote.ambiguity is not None
-                            else None
-                        )
-                        self._finish_remote_error(generation_id, code, candidates)
-                        return
-                    time.sleep(settings.WORKER_REMOTE_POLL_SECONDS)
+                if generation.runtime_id and health.runtime_id != generation.runtime_id:
+                    raise AIRuntimeLost("Le runtime Colab a changé.")
+                runtime_id = health.runtime_id
+                bundle = client.generate_campaign(
+                    image_bytes=image_bytes,
+                    filename=filename,
+                    fields={
+                        "brand": generation.product.brand or "",
+                        "product_name": generation.product.name,
+                        "category": generation.product.category,
+                        "tone": "premium",
+                        "seed": str(generation.seed),
+                        "generation_id": str(generation.id),
+                        "request_id": generation.request_id,
+                        "input_snapshot_hash": generation.input_snapshot_hash,
+                        "language": generation.language.value,
+                    },
+                )
+                self._install_success(generation, bundle, runtime_id)
         except Exception as exc:
             logger.error(
                 "generation_failed generation_id=%s error_type=%s",
