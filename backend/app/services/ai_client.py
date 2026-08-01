@@ -33,7 +33,7 @@ class AIProtocolError(AIClientError):
 
 
 class RemoteModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # Colab may add informational model fields without breaking the stable contract.\n    model_config = ConfigDict(extra="ignore")
 
 
 class HealthContract(RemoteModel):
@@ -52,7 +52,7 @@ class AIClient:
         *,
         base_url: str,
         token: str = "",
-        timeout_seconds: float = 300,
+        timeout_seconds: float = 600,
         transport: httpx.BaseTransport | None = None,
     ):
         value = str(base_url or "").strip().rstrip("/")
