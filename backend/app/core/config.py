@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     ALLOWED_MIME_TYPES: str = "image/jpeg,image/png,image/webp"
     ARTIFACT_ROOT: Path = Path("/app/artifacts")
 
-    AI_SERVICE_URL: str = ""
+    COLAB_AI_URL: str = ""
     AI_SERVICE_TOKEN: str = ""
     AI_CONNECT_TIMEOUT_SECONDS: float = Field(default=5.0, ge=0.5, le=30)
     AI_READ_TIMEOUT_SECONDS: float = Field(default=30.0, ge=1, le=120)
@@ -85,16 +85,16 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
-    def validate_ai_service(self) -> "Settings":
-        if not self.AI_SERVICE_URL:
+    def validate_colab_service(self) -> "Settings":
+        if not self.COLAB_AI_URL:
             if self.APP_ENV == "production":
-                raise ValueError("AI_SERVICE_URL is required in production")
+                raise ValueError("COLAB_AI_URL is required in production")
             return self
-        parsed = urlsplit(self.AI_SERVICE_URL)
+        parsed = urlsplit(self.COLAB_AI_URL)
         try:
             parsed.port
         except ValueError as exc:
-            raise ValueError("AI_SERVICE_URL has an invalid port") from exc
+            raise ValueError("COLAB_AI_URL has an invalid port") from exc
         if (
             not parsed.hostname
             or parsed.username is not None
@@ -103,7 +103,7 @@ class Settings(BaseSettings):
             or parsed.query
             or parsed.fragment
         ):
-            raise ValueError("AI_SERVICE_URL must be an origin URL")
+            raise ValueError("COLAB_AI_URL must be an origin URL")
         local_hosts = {"localhost", "127.0.0.1", "::1"}
         if parsed.scheme == "https":
             pass
@@ -114,7 +114,7 @@ class Settings(BaseSettings):
         ):
             pass
         else:
-            raise ValueError("AI_SERVICE_URL must use HTTPS")
+            raise ValueError("COLAB_AI_URL must use HTTPS")
         if len(self.AI_SERVICE_TOKEN) < 32:
             raise ValueError("AI_SERVICE_TOKEN must contain at least 32 characters")
         return self
