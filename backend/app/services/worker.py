@@ -414,6 +414,7 @@ class GenerationWorker:
                 if generation.runtime_id and health.runtime_id != generation.runtime_id:
                     raise AIRuntimeLost("Le runtime Colab a changé.")
                 runtime_id = health.runtime_id
+                self._set_remote_identity(generation.id, "colab-direct", runtime_id)
                 bundle = client.generate_campaign(
                     image_bytes=image_bytes,
                     filename=filename,
