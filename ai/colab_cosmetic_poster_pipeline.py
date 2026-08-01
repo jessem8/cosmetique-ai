@@ -537,10 +537,9 @@ def create_app() -> Any:
     from fastapi.responses import JSONResponse, Response
 
     app = FastAPI(title="Cosmetic AI Colab Service", version=PIPELINE_VERSION)
-    runtime_token = os.getenv("COLAB_AI_TOKEN", os.getenv("AI_SERVICE_TOKEN", "")).strip()
-
     @app.middleware("http")
     async def authenticate(request: Request, call_next: Any) -> Any:
+        runtime_token = os.getenv("COLAB_AI_TOKEN", os.getenv("AI_SERVICE_TOKEN", "")).strip()
         if runtime_token and request.url.path in {"/health", "/generate-campaign", "/generate-text"}:
             supplied = request.headers.get("authorization", "")
             expected = f"Bearer {runtime_token}"
@@ -649,9 +648,16 @@ def run_public_server(port: int = 8000) -> str:
     if not token:
         raise PipelineError("Set NGROK_AUTHTOKEN before opening the ngrok tunnel")
 
+    service_token = os.getenv("COLAB_AI_TOKEN", os.getenv("AI_SERVICE_TOKEN", "")).strip()
+    if not service_token:
+        import secrets
+        service_token = secrets.token_urlsafe(48)
+        os.environ["COLAB_AI_TOKEN"] = service_token
+
     ngrok.set_auth_token(token)
     public_url = ngrok.connect(str(port), "http").public_url
     print(f"Colab API: {public_url}")
+    print(f"COLAB_AI_TOKEN: {service_token}")
     uvicorn.run(app, host="0.0.0.0", port=port)
     return public_url
 
