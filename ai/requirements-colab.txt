@@ -1,5 +1,5 @@
 # Google Colab GPU runtime dependencies for the canonical pipeline
-Pillow>=10
+Pillow==12.3.0
 rembg
 onnxruntime-gpu
 paddleocr
