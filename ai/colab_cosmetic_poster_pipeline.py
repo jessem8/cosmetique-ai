@@ -22,6 +22,7 @@ import re
 import socket
 import threading
 import time
+import urllib.request
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, Mapping
@@ -854,15 +855,12 @@ def runtime_ready() -> bool:
         import rembg  # noqa: F401
         import paddleocr  # noqa: F401
         import diffusers  # noqa: F401
-        import ollama
         if not torch.cuda.is_available():
             return False
-        tags = ollama.Client(host=normalize_ollama_host(OLLAMA_HOST)).list()
-        models = (
-            tags.get("models", [])
-            if isinstance(tags, Mapping)
-            else getattr(tags, "models", [])
-        )
+        tags_url = f"{normalize_ollama_host(OLLAMA_HOST)}/api/tags"
+        with urllib.request.urlopen(tags_url, timeout=5) as response:
+            tags = json.loads(response.read().decode("utf-8"))
+        models = tags.get("models", []) if isinstance(tags, Mapping) else []
         wanted = {
             name.split(":", 1)[0].casefold()
             for name in (OLLAMA_MODEL, *OLLAMA_FALLBACK_MODELS)
