@@ -943,6 +943,13 @@ def create_app() -> Any:
     from fastapi import FastAPI, File, Form, Request, UploadFile
     from fastapi.responses import JSONResponse, Response
 
+    # ``from __future__ import annotations`` stores endpoint annotations as
+    # strings.  FastAPI/Pydantic resolves those strings from this module's
+    # globals, not from ``create_app``'s local scope.  Without this binding,
+    # recent Pydantic releases reject multipart uploads with an unresolved
+    # ``ForwardRef('UploadFile')`` before the campaign handler can run.
+    globals()["UploadFile"] = UploadFile
+
     app = FastAPI(title="Cosmetic AI Colab Service", version=PIPELINE_VERSION)
     @app.middleware("http")
     async def authenticate(request: Request, call_next: Any) -> Any:
