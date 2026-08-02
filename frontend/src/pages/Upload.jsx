@@ -207,22 +207,6 @@ function Upload() {
     }
   }
 
-  const retryLaunch = async () => {
-    const uploadedProduct = uploadedProductRef.current
-    if (!uploadedProduct || uploadedProduct.fingerprint !== productFingerprint) {
-      return
-    }
-    setSubmitting(true)
-    setSubmitError(null)
-    try {
-      await launchGeneration(uploadedProduct.id)
-    } catch (error) {
-      setSubmitError(error)
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
   return (
     <div className="workspace-page workspace-page--wide">
       <header className="page-heading page-heading--editorial">
@@ -494,26 +478,16 @@ function Upload() {
               </div>
             </div>
           </section>
-        </div>
-
-        {submitError && (
-          <div className="inline-alert inline-alert--error" role="alert">
-            <div>
-              <strong>La campagne n’a pas été lancée.</strong>
-              <p>{submitError.message}</p>
+          {submitError && (
+            <div className="inline-alert inline-alert--error campaign-form__error" role="alert">
+              <div>
+                <strong>La campagne n’a pas été lancée.</strong>
+                <p>{submitError.message}</p>
+                <p>Vérifiez le brief ou le studio IA, puis utilisez le bouton de lancement unique ci-dessous.</p>
+              </div>
             </div>
-            {uploadedProductRef.current?.fingerprint === productFingerprint && (
-              <button
-                type="button"
-                className="button button--secondary"
-                onClick={retryLaunch}
-                disabled={submitting}
-              >
-                Réessayer le lancement
-              </button>
-            )}
-          </div>
-        )}
+          )}
+        </div>
 
         <footer className="campaign-form__footer">
           <p>

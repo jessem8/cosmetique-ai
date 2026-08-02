@@ -53,6 +53,14 @@ def test_versioned_api_exposes_only_complete_generation_workflow():
         "GET",
         "/api/v1/generations/{generation_id}/artifacts/{artifact_name}",
     ) in routes
+    assert (
+        "POST",
+        "/api/v1/generations/{generation_id}/captions/{platform}",
+    ) in routes
+    assert (
+        "POST",
+        "/api/v1/generations/{generation_id}/enhancements/{platform}",
+    ) in routes
     assert all(not path.startswith("/uploads") for _, path in routes)
     assert all("regenerate-text" not in path for _, path in routes)
     assert all("regenerate-decor" not in path for _, path in routes)

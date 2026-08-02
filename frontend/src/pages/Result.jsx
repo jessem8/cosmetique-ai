@@ -7,6 +7,7 @@ import {
   Copy,
   DownloadSimple,
   Eye,
+  MagicWand,
   WarningCircle,
   X,
 } from '@phosphor-icons/react'
@@ -68,6 +69,9 @@ function useCampaignAssets(generation) {
       'cutout.png',
       'mask.png',
       'background.jpg',
+      ...(generation.artifacts || [])
+        .map((asset) => asset.name)
+        .filter((name) => name.endsWith('-enhanced.jpg')),
     ]
 
     setState({
@@ -125,7 +129,12 @@ function useCampaignAssets(generation) {
       controller.abort()
       ownedUrls.forEach((url) => URL.revokeObjectURL(url))
     }
-  }, [attempt, generation?.id, generation?.status])
+  }, [
+    attempt,
+    generation?.id,
+    generation?.status,
+    generation?.artifacts?.map((asset) => asset.name).join('|'),
+  ])
 
   return {
     urls: state.urls,
@@ -398,6 +407,9 @@ function Result() {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [copied, setCopied] = useState(false)
   const [downloading, setDownloading] = useState(false)
+  const [captioning, setCaptioning] = useState(false)
+  const [enhancing, setEnhancing] = useState(false)
+  const [showEnhanced, setShowEnhanced] = useState(false)
   const tabRefs = useRef([])
   const assets = useCampaignAssets(generation)
   const original = useOriginalImage(generation)
@@ -407,6 +419,9 @@ function Result() {
   const platform =
     PLATFORMS.find((item) => item.id === activePlatform) || PLATFORMS[0]
   const platformCopy = generation?.copy?.[activePlatform] || null
+  const enhancedFilename = `${platform.id}-enhanced.jpg`
+  const hasEnhanced = Boolean(assets.urls[enhancedFilename])
+  const displayedFilename = showEnhanced && hasEnhanced ? enhancedFilename : platform.filename
   const copyLanguage = generation?.language === 'en' ? 'en' : 'fr'
   const evidenceError = original.error || assets.error
   const evidenceLoading = original.isLoading || assets.isLoading
@@ -430,6 +445,11 @@ function Result() {
       .finally(() => setLoading(false))
     return () => controller.abort()
   }, [id])
+
+  useEffect(() => {
+    setShowEnhanced(false)
+    setCopied(false)
+  }, [activePlatform])
 
   const selectPlatformByKey = (event, index) => {
     const direction = {
@@ -473,6 +493,53 @@ function Result() {
       setError(requestError)
     } finally {
       setDownloading(false)
+    }
+  }
+
+  const downloadVisual = async () => {
+    setDownloading(true)
+    setError(null)
+    try {
+      const response = await generations.getArtifact(id, displayedFilename)
+      const url = URL.createObjectURL(response.data)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `cosmetique-ai-${platform.id}${showEnhanced && hasEnhanced ? '-enhanced' : ''}.jpg`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+    } catch (requestError) {
+      setError(requestError)
+    } finally {
+      setDownloading(false)
+    }
+  }
+
+  const generateCaption = async () => {
+    setCaptioning(true)
+    setError(null)
+    try {
+      const response = await generations.generateCaption(id, platform.id)
+      setGeneration(response.data)
+    } catch (requestError) {
+      setError(requestError)
+    } finally {
+      setCaptioning(false)
+    }
+  }
+
+  const enhanceVisual = async () => {
+    setEnhancing(true)
+    setError(null)
+    try {
+      const response = await generations.enhance(id, platform.id)
+      setGeneration(response.data)
+      setShowEnhanced(true)
+    } catch (requestError) {
+      setError(requestError)
+    } finally {
+      setEnhancing(false)
     }
   }
 
@@ -606,11 +673,11 @@ function Result() {
             aria-labelledby={`tab-${platform.id}`}
             tabIndex="0"
           >
-            {assets.urls[platform.filename] ? (
+            {assets.urls[displayedFilename] ? (
               <img
                 className="platform-viewer__image"
-                src={assets.urls[platform.filename]}
-                alt={`Visuel ${platform.label} de la campagne`}
+                src={assets.urls[displayedFilename]}
+                alt={`${showEnhanced && hasEnhanced ? 'Finition publicitaire' : 'Visuel'} ${platform.label} de la campagne`}
               />
             ) : assets.isLoading ? (
               <div role="status" aria-label={`Chargement du visuel ${platform.label}`}>
@@ -633,7 +700,47 @@ function Result() {
                   Réessayer les preuves
                 </button>
               </div>
+              )}
+          </div>
+          <div className="platform-studio__actions" aria-live="polite">
+            {hasEnhanced && (
+              <div className="platform-tabs platform-tabs--version" role="group" aria-label="Version du visuel">
+                <button
+                  type="button"
+                  aria-pressed={!showEnhanced}
+                  onClick={() => setShowEnhanced(false)}
+                >
+                  Original
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={showEnhanced}
+                  onClick={() => setShowEnhanced(true)}
+                >
+                  Finition publicitaire
+                </button>
+              </div>
             )}
+            {!hasEnhanced && (
+              <button
+                type="button"
+                className="button button--secondary button--small"
+                disabled={enhancing}
+                onClick={enhanceVisual}
+              >
+                <MagicWand size={17} aria-hidden="true" />
+                {enhancing ? 'Création de la finition' : 'Ajouter une finition publicitaire'}
+              </button>
+            )}
+            <button
+              type="button"
+              className="button button--quiet button--small"
+              disabled={downloading || !assets.urls[displayedFilename]}
+              onClick={downloadVisual}
+            >
+              <DownloadSimple size={17} aria-hidden="true" />
+              Télécharger ce visuel
+            </button>
           </div>
         </section>
 
@@ -659,6 +766,24 @@ function Result() {
               )}
               {copied ? 'Copié' : 'Copier'}
             </button>
+          </div>
+          <div className="copy-panel__actions" aria-live="polite">
+            <button
+              type="button"
+              className="button button--secondary button--small"
+              disabled={captioning || platformCopy?.generated}
+              onClick={generateCaption}
+            >
+              <MagicWand size={17} aria-hidden="true" />
+              {captioning
+                ? 'Génération de la légende'
+                : platformCopy?.generated
+                  ? 'Légende Qwen prête'
+                  : `Générer la légende ${platform.label}`}
+            </button>
+            {!platformCopy?.generated && (
+              <span className="copy-panel__hint">Une version sûre est affichée en attendant.</span>
+            )}
           </div>
           {platformCopy?.text && (
             <div className="copy-block">

@@ -160,6 +160,18 @@ export const generations = {
       responseType: 'blob',
       timeout: DOWNLOAD_TIMEOUT,
     }),
+  generateCaption: (id, platform, { signal } = {}) =>
+    client.post(
+      `/generations/${encodeURIComponent(id)}/captions/${encodeURIComponent(platform)}`,
+      {},
+      { signal }
+    ),
+  enhance: (id, platform, { signal } = {}) =>
+    client.post(
+      `/generations/${encodeURIComponent(id)}/enhancements/${encodeURIComponent(platform)}`,
+      {},
+      { signal }
+    ),
 }
 
 export default client

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+import hashlib
 from datetime import datetime
 
 from fastapi import APIRouter, Header, HTTPException, Query, status
@@ -14,7 +15,7 @@ from sqlalchemy.orm import joinedload
 from ai_core.schemas import ProductSnapshot
 from app.core.config import settings
 from app.dependencies import CurrentUser, DBSession
-from app.models import Asset, Generation, GenerationStatus, Product
+from app.models import Asset, AssetFormat, Generation, GenerationStatus, Product
 from app.schemas import (
     AmbiguityOut,
     ArtifactOut,
@@ -26,8 +27,14 @@ from app.schemas import (
     ProductSummary,
 )
 from app.services.ai_client import AIClient, AIClientError
-from app.services.artifacts import ARTIFACT_NAMES
-from app.services.copy_projection import project_copy_for_browser
+from app.services.artifacts import ArtifactContractError, PUBLIC_ARTIFACT_NAMES
+from app.services.copy_projection import (
+    PLATFORMS,
+    caption_from_response,
+    fallback_caption,
+    project_copy_for_browser,
+)
+from app.services.enhancements import premium_finish
 from app.services.generation_jobs import (
     IdempotencyConflict,
     decode_cursor,
@@ -159,7 +166,9 @@ def generation_out(generation: Generation) -> GenerationOut:
         error=error,
         ambiguity=ambiguity,
         copy=(
-            project_copy_for_browser(generation.copy_json)
+            project_copy_for_browser(
+                generation.copy_json, getattr(generation, "platform_captions", None)
+            )
             if generation.status == GenerationStatus.DONE
             else None
         ),
@@ -350,6 +359,113 @@ def list_generations(
     )
 
 
+@router.post("/generations/{generation_id}/captions/{platform}", response_model=GenerationOut)
+def generate_platform_caption(
+    generation_id: uuid.UUID,
+    platform: str,
+    db: DBSession,
+    current_user: CurrentUser,
+) -> GenerationOut:
+    if platform not in PLATFORMS:
+        raise HTTPException(status_code=404, detail="Plateforme introuvable.")
+    generation = _owned_generation(db, generation_id, current_user.id)
+    if generation.status != GenerationStatus.DONE or not generation.copy_json:
+        raise HTTPException(status_code=409, detail="La campagne doit être terminée.")
+
+    stored = dict(generation.platform_captions or {})
+    if caption_from_response(stored.get(platform), platform=platform):
+        return generation_out(generation)
+
+    copy = generation.copy_json
+    brief = (
+        generation.input_snapshot.get("generation", {})
+        if isinstance(generation.input_snapshot, dict)
+        else {}
+    )
+    ocr = copy.get("_meta", {}).get("ocr", {}) if isinstance(copy.get("_meta"), dict) else {}
+    payload = {
+        "mode": "platform_caption",
+        "platform": platform,
+        "language": generation.language.value,
+        "ocr_text": str(ocr.get("text") or copy.get("_meta", {}).get("ocr_text") or ""),
+        "brand": copy.get("brand", ""),
+        "product_name": copy.get("product_name", ""),
+        "category": copy.get("category", ""),
+        "metadata": {
+            "titre": copy.get("titre", ""),
+            "sous_titre": copy.get("sous_titre", ""),
+            "bullets": copy.get("bullets", []),
+            "cta": copy.get("cta", ""),
+            "hashtags": copy.get("hashtags", []),
+            "audience": brief.get("audience", ""),
+            "verified_claims": brief.get("verified_claims", []),
+        },
+    }
+    caption = None
+    try:
+        with AIClient(
+            base_url=settings.COLAB_AI_URL,
+            token=settings.AI_SERVICE_TOKEN,
+            timeout_seconds=settings.AI_HEALTH_TIMEOUT_SECONDS,
+        ) as client:
+            caption = caption_from_response(client.generate_text(payload), platform=platform)
+    except (AIClientError, ValueError):
+        caption = None
+    stored[platform] = caption or fallback_caption(copy, platform)
+    generation.platform_captions = stored
+    db.commit()
+    db.refresh(generation)
+    return generation_out(generation)
+
+
+@router.post("/generations/{generation_id}/enhancements/{platform}", response_model=GenerationOut)
+def create_platform_enhancement(
+    generation_id: uuid.UUID,
+    platform: str,
+    db: DBSession,
+    current_user: CurrentUser,
+) -> GenerationOut:
+    if platform not in PLATFORMS:
+        raise HTTPException(status_code=404, detail="Plateforme introuvable.")
+    generation = _owned_generation(db, generation_id, current_user.id)
+    if generation.status != GenerationStatus.DONE or not generation.copy_json:
+        raise HTTPException(status_code=409, detail="La campagne doit être terminée.")
+    enhanced_name = f"{platform}-enhanced.jpg"
+    if any(asset.artifact_name == enhanced_name for asset in generation.assets):
+        return generation_out(generation)
+    source_name = f"{platform}.jpg"
+    source = next((asset for asset in generation.assets if asset.artifact_name == source_name), None)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Visuel source introuvable.")
+    try:
+        enhanced = premium_finish(
+            storage.read_bytes(source.storage_key),
+            platform=platform,
+            copy=generation.copy_json,
+            art_direction=(generation.artifact_manifest or {}).get("art_direction"),
+        )
+        storage_key = f"generations/{generation.id}/{enhanced_name}"
+        storage.put_bytes(storage_key, enhanced)
+    except (StorageError, ArtifactContractError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail="La finition publicitaire n'a pas pu être créée.") from exc
+    db.add(
+        Asset(
+            generation_id=generation.id,
+            artifact_name=enhanced_name,
+            format=AssetFormat(platform),
+            storage_key=storage_key,
+            mime="image/jpeg",
+            sha256=hashlib.sha256(enhanced).hexdigest(),
+            byte_size=len(enhanced),
+            width=source.width,
+            height=source.height,
+        )
+    )
+    db.commit()
+    db.refresh(generation)
+    return generation_out(generation)
+
+
 @router.get("/generations/{generation_id}/bundle", response_class=FileResponse)
 def get_bundle(
     generation_id: uuid.UUID, db: DBSession, current_user: CurrentUser
@@ -387,7 +503,7 @@ def get_artifact(
     db: DBSession,
     current_user: CurrentUser,
 ) -> FileResponse:
-    if artifact_name not in ARTIFACT_NAMES:
+    if artifact_name not in PUBLIC_ARTIFACT_NAMES:
         raise HTTPException(status_code=404, detail="Artefact introuvable.")
     generation = _owned_generation(db, generation_id, current_user.id)
     if generation.status != GenerationStatus.DONE:

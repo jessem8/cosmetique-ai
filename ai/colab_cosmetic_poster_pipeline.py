@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import hmac
+import hashlib
 import io
 import json
 import math
@@ -133,6 +134,20 @@ _COPY_SCHEMA = {
         "hashtags",
         "_meta",
     ],
+}
+
+_CAPTION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "text": {"type": "string", "minLength": 1, "maxLength": 900},
+        "hashtags": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 2, "maxLength": 64},
+            "maxItems": 5,
+        },
+    },
+    "required": ["text", "hashtags"],
 }
 
 
@@ -564,8 +579,72 @@ def generate_environment(
     return result.convert("RGB")
 
 
+def _hex_color(value: tuple[int, int, int]) -> str:
+    return "#" + "".join(f"{max(0, min(255, part)):02X}" for part in value)
+
+
+def _mix_color(
+    left: tuple[int, int, int], right: tuple[int, int, int], amount: float
+) -> tuple[int, int, int]:
+    return tuple(round(a * (1 - amount) + b * amount) for a, b in zip(left, right))
+
+
+def _color_from_hex(value: str) -> tuple[int, int, int]:
+    return tuple(int(value[index : index + 2], 16) for index in (1, 3, 5))
+
+
+def derive_art_direction(
+    cutout: Image.Image, metadata: Mapping[str, str], seed: int
+) -> dict[str, Any]:
+    """Create a repeatable editorial theme from product pixels and identity."""
+    identity = "|".join(
+        (metadata.get("brand", ""), metadata.get("product_name", ""), metadata.get("category", ""), str(seed))
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).digest()
+    category_palette = {
+        "deodorant": ((218, 238, 238), (42, 141, 157)),
+        "perfume": ((239, 221, 212), (174, 112, 101)),
+        "makeup": ((246, 219, 229), (190, 87, 121)),
+        "skincare": ((224, 239, 226), (94, 143, 100)),
+        "haircare": ((235, 225, 211), (146, 111, 80)),
+        "bodycare": ((232, 232, 245), (116, 112, 171)),
+    }
+    fallback_base, fallback_accent = category_palette.get(
+        normalize_category(metadata.get("category")), ((227, 237, 235), (89, 138, 132))
+    )
+    thumbnail = cutout.convert("RGBA").copy()
+    thumbnail.thumbnail((96, 96), Image.Resampling.LANCZOS)
+    pixels = [pixel[:3] for pixel in thumbnail.getdata() if pixel[3] >= 220]
+    colorful = [
+        pixel
+        for pixel in pixels
+        if max(pixel) - min(pixel) >= 24 and 30 <= sum(pixel) / 3 <= 235
+    ]
+    source = colorful or pixels
+    if source:
+        # Select a stable weighted average rather than a single label pixel.
+        dominant = tuple(round(sum(pixel[index] for pixel in source) / len(source)) for index in range(3))
+        accent = _mix_color(fallback_accent, dominant, 0.62)
+    else:
+        accent = fallback_accent
+    base = _mix_color((252, 253, 252), fallback_base, 0.56)
+    panel = _mix_color((255, 255, 255), base, 0.64)
+    ink = _mix_color(accent, (19, 34, 53), 0.82)
+    line = _mix_color(accent, (255, 255, 255), 0.38)
+    layouts = ("halo", "ribbons", "pedestal", "orbit")
+    return {
+        "layout": layouts[digest[0] % len(layouts)],
+        "base": _hex_color(base),
+        "panel": _hex_color(panel),
+        "accent": _hex_color(accent),
+        "line": _hex_color(line),
+        "ink": _hex_color(ink),
+        "seed_token": hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12],
+    }
+
+
 def deterministic_studio_background(
-    canvas_size: tuple[int, int], category: str
+    canvas_size: tuple[int, int], art_direction: Mapping[str, Any]
 ) -> Image.Image:
     """Build a text-free editorial backdrop without a generative model.
 
@@ -574,31 +653,52 @@ def deterministic_studio_background(
     unrelated objects in a paid campaign asset.
     """
     width, height = canvas_size
-    palette = {
-        "deodorant": ((241, 248, 247), (205, 232, 231), (128, 191, 193)),
-        "perfume": ((248, 243, 239), (232, 214, 203), (183, 142, 126)),
-        "makeup": ((252, 244, 246), (242, 211, 221), (202, 131, 153)),
-    }
-    base, accent, line = palette.get(
-        normalize_category(category), ((246, 247, 245), (218, 229, 226), (143, 178, 174))
-    )
+    base = _color_from_hex(str(art_direction["base"]))
+    accent = _color_from_hex(str(art_direction["accent"]))
+    line = _color_from_hex(str(art_direction["line"]))
+    layout = str(art_direction["layout"])
     canvas = Image.new("RGB", canvas_size, base)
     draw = ImageDraw.Draw(canvas, "RGBA")
-    # Keep the copy side calm; a few restrained geometric forms create depth
-    # solely on the product side, where no generated text can appear.
-    draw.ellipse(
-        (int(width * 0.52), int(-height * 0.16), int(width * 1.08), int(height * 0.56)),
-        fill=(*accent, 125),
-    )
-    draw.ellipse(
-        (int(width * 0.63), int(height * 0.42), int(width * 1.13), int(height * 1.12)),
-        fill=(*accent, 105),
-    )
+    # The reserved copy side remains calm. Every recipe only draws in the
+    # product side and never introduces model-generated letters or logos.
+    if layout == "ribbons":
+        draw.polygon(
+            [(int(width * 0.54), 0), (width, int(height * 0.12)), (width, int(height * 0.45)), (int(width * 0.60), int(height * 0.31))],
+            fill=(*accent, 96),
+        )
+        draw.polygon(
+            [(int(width * 0.63), height), (width, int(height * 0.72)), (width, height), (int(width * 0.71), height)],
+            fill=(*line, 115),
+        )
+    elif layout == "pedestal":
+        draw.ellipse(
+            (int(width * 0.57), int(height * 0.73), int(width * 1.04), int(height * 1.03)),
+            fill=(*accent, 92),
+        )
+        draw.rounded_rectangle(
+            (int(width * 0.62), int(height * 0.16), int(width * 0.95), int(height * 0.87)),
+            radius=max(18, int(min(width, height) * 0.06)),
+            outline=(*line, 150), width=max(2, int(min(width, height) * 0.004)),
+        )
+    elif layout == "orbit":
+        for offset, alpha in ((0.0, 85), (0.13, 60), (0.26, 38)):
+            draw.arc(
+                (int(width * (0.48 + offset)), int(height * (0.02 + offset)), int(width * (1.10 - offset)), int(height * (0.98 - offset))),
+                250, 105, fill=(*accent, alpha), width=max(2, int(min(width, height) * 0.006)),
+            )
+    else:
+        draw.ellipse(
+            (int(width * 0.52), int(-height * 0.16), int(width * 1.08), int(height * 0.56)),
+            fill=(*accent, 125),
+        )
+        draw.ellipse(
+            (int(width * 0.63), int(height * 0.42), int(width * 1.13), int(height * 1.12)),
+            fill=(*accent, 105),
+        )
     draw.rounded_rectangle(
         (int(width * 0.58), int(height * 0.10), int(width * 0.96), int(height * 0.90)),
         radius=max(18, int(min(width, height) * 0.06)),
-        outline=(*line, 115),
-        width=max(2, int(min(width, height) * 0.004)),
+        outline=(*line, 115), width=max(2, int(min(width, height) * 0.004)),
     )
     return canvas
 
@@ -792,18 +892,20 @@ def generate_campaign_zip(
     copy = _safe_marketing_copy(metadata, str(ocr.get("text", "")), language)
     timings["copy_seconds"] = round(time.perf_counter() - stage, 3)
 
+    art_direction = derive_art_direction(cutout, metadata, seed)
+
     stage = time.perf_counter()
     _, _, square_product, square_position = prepare_inpainting_inputs(
         cutout, (1024, 1024)
     )
-    square_scene = deterministic_studio_background((1024, 1024), metadata["category"])
+    square_scene = deterministic_studio_background((1024, 1024), art_direction)
     timings["square_scene_seconds"] = round(time.perf_counter() - stage, 3)
 
     stage = time.perf_counter()
     _, _, wide_product, wide_position = prepare_inpainting_inputs(
         cutout, (1216, 640)
     )
-    wide_scene = deterministic_studio_background((1216, 640), metadata["category"])
+    wide_scene = deterministic_studio_background((1216, 640), art_direction)
     timings["wide_scene_seconds"] = round(time.perf_counter() - stage, 3)
 
     # The renderer receives the original rembg pixels, never the SDXL package.
@@ -842,6 +944,7 @@ def generate_campaign_zip(
         "copy_language": language,
         "source_name": source_name,
         "category": metadata["category"],
+        "art_direction": art_direction,
         "scenes": {
             "square": {"dimensions": [1024, 1024], "seed": seed},
             "wide": {"dimensions": [1216, 640], "seed": seed + 1},
@@ -857,7 +960,7 @@ def generate_campaign_zip(
         "models": {
             "background_removal": "isnet-general-use",
             "ocr": "PaddleOCR-lang-fr",
-            "background_generation": "deterministic-studio-v1",
+            "background_generation": "deterministic-studio-v2-product-conditioned",
             "copy_generation": "deterministic-french-v1",
         },
         "seed": seed,
@@ -907,6 +1010,68 @@ def generate_text_only(
         }
     )
     return generate_marketing_copy(ocr, supplied, tone, language=language)
+
+
+def generate_platform_caption(
+    *,
+    platform: str,
+    language: str,
+    brand: str,
+    product_name: str,
+    category: str,
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Use Qwen for one concise social caption constrained to verified copy."""
+    if platform not in {"instagram", "facebook", "linkedin"}:
+        raise PipelineError("Unsupported caption platform")
+    try:
+        from ollama import Client
+    except ImportError as exc:
+        raise PipelineError("Ollama is required for platform captions") from exc
+    language = (language or "fr").strip().lower()
+    guidance = {
+        "instagram": "Deux à quatre lignes courtes, ton sensoriel, au plus cinq hashtags.",
+        "facebook": "Un paragraphe lisible, ton chaleureux, au plus deux hashtags.",
+        "linkedin": "Un paragraphe professionnel et sobre, au plus deux hashtags.",
+    }[platform]
+    verified = json.dumps(dict(metadata), ensure_ascii=False)
+    prompt = f"""
+Plateforme: {platform}
+Produit: {brand} {product_name}
+Catégorie: {category}
+Langue: {language}
+Informations créatives et vérifiées à respecter: {verified}
+
+{guidance}
+Retourne uniquement le JSON demandé. N'ajoute aucune promesse clinique, médicale,
+chiffrée, ingrédient, bénéfice ou allégation qui ne figure pas dans les informations
+fournies. Ne répète pas inutilement le nom du produit.
+"""
+    client = Client(host=normalize_ollama_host(OLLAMA_HOST))
+    errors: list[str] = []
+    for model in tuple(dict.fromkeys((OLLAMA_MODEL, *OLLAMA_FALLBACK_MODELS))):
+        try:
+            response = client.chat(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "Tu écris des légendes cosmétiques courtes. Réponds uniquement par le JSON conforme au schéma."},
+                    {"role": "user", "content": prompt},
+                ],
+                format=_CAPTION_SCHEMA,
+                stream=False,
+                think=False,
+                keep_alive=0,
+                options={"temperature": 0.35, "seed": 42, "num_ctx": 4096},
+            )
+            value = json.loads(_ollama_content(response))
+            text = " ".join(str(value.get("text", "")).split())
+            tags = value.get("hashtags", [])
+            if not text or len(text) > 900 or not isinstance(tags, list):
+                raise ValueError("caption does not satisfy the contract")
+            return {"text": text, "hashtags": [str(tag).strip() for tag in tags if str(tag).strip()][:5]}
+        except Exception as exc:
+            errors.append(f"{model}: {exc}")
+    raise PipelineError("Qwen caption generation failed: " + " | ".join(errors[-2:]))
 
 
 def runtime_ready() -> bool:
@@ -1047,6 +1212,18 @@ def create_app() -> Any:
     @app.post("/generate-text")
     async def generate_text(payload: dict[str, Any]) -> dict[str, Any]:
         try:
+            if payload.get("mode") == "platform_caption":
+                metadata = payload.get("metadata")
+                if not isinstance(metadata, Mapping):
+                    raise ValueError("platform caption metadata is required")
+                return generate_platform_caption(
+                    platform=str(payload.get("platform", "")),
+                    language=str(payload.get("language", "fr")),
+                    brand=str(payload.get("brand", "")),
+                    product_name=str(payload.get("product_name", "")),
+                    category=str(payload.get("category", "")),
+                    metadata=metadata,
+                )
             return generate_text_only(
                 ocr_text=str(payload.get("ocr_text", "")),
                 brand=str(payload.get("brand", "")),
@@ -1056,7 +1233,7 @@ def create_app() -> Any:
                 language=str(payload.get("language", "fr")),
                 metadata=payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else None,
             )
-        except PipelineError as exc:
+        except (PipelineError, ValueError) as exc:
             from fastapi import HTTPException
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

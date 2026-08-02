@@ -1569,6 +1569,31 @@ h2 {
   color: #fff;
 }
 
+.platform-tabs--version button[aria-pressed="true"] {
+  background: var(--graphite-950);
+  color: #fff;
+}
+
+.platform-studio__actions,
+.copy-panel__actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  padding-top: 1rem;
+}
+
+.copy-panel__actions {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 1rem;
+}
+
+.copy-panel__hint {
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
 .platform-viewer {
   align-items: center;
   background:

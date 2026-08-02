@@ -30,6 +30,10 @@ REQUIRED_ARCHIVE_FILES = frozenset(
 # Pipeline 1.2.0 promotes diagnostic images to evidence-bearing members.
 OPTIONAL_ARCHIVE_FILES = frozenset()
 ARTIFACT_NAMES = REQUIRED_ARCHIVE_FILES | OPTIONAL_ARCHIVE_FILES
+DERIVED_ARTIFACT_NAMES = frozenset(
+    f"{platform}-enhanced.jpg" for platform in ("instagram", "facebook", "linkedin")
+)
+PUBLIC_ARTIFACT_NAMES = ARTIFACT_NAMES | DERIVED_ARTIFACT_NAMES
 CHECKSUM_MEMBER_NAMES = ARTIFACT_NAMES
 PIPELINE_VERSION = "1.2.0"
 MAX_BUNDLE_BYTES = 50 * 1024 * 1024
@@ -335,7 +339,47 @@ def _draw_wrapped_text(draw: ImageDraw.ImageDraw, text: str, xy: tuple[int, int]
     return y
 
 
-def _overlay_poster_typography(payload: bytes, copy: dict[str, Any], name: str) -> bytes:
+def _theme_color(value: Any, fallback: tuple[int, int, int]) -> tuple[int, int, int]:
+    if not isinstance(value, str) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", value):
+        return fallback
+    return tuple(int(value[index : index + 2], 16) for index in (1, 3, 5))
+
+
+def _validated_art_direction(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Accept a small, deterministic palette contract from the Colab runtime."""
+    raw = manifest.get("art_direction")
+    if raw is None:
+        return {
+            "layout": "halo",
+            "panel": "#F6FAF7",
+            "accent": "#25A9B8",
+            "ink": "#17315E",
+        }
+    if not isinstance(raw, dict):
+        raise ArtifactContractError("manifest art_direction is invalid")
+    layout = raw.get("layout")
+    if layout not in {"halo", "ribbons", "pedestal", "orbit"}:
+        raise ArtifactContractError("manifest art_direction layout is invalid")
+    result = {"layout": layout}
+    for key, fallback in (
+        ("panel", "#F6FAF7"),
+        ("accent", "#25A9B8"),
+        ("ink", "#17315E"),
+        ("line", "#8FB2AE"),
+    ):
+        value = raw.get(key, fallback)
+        if not isinstance(value, str) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", value):
+            raise ArtifactContractError(f"manifest art_direction {key} is invalid")
+        result[key] = value.upper()
+    return result
+
+
+def _overlay_poster_typography(
+    payload: bytes,
+    copy: dict[str, Any],
+    name: str,
+    art_direction: dict[str, Any],
+) -> bytes:
     expected_size = _POSTER_FORMATS[name]
     try:
         image = Image.open(io.BytesIO(payload)).convert("RGB")
@@ -355,6 +399,9 @@ def _overlay_poster_typography(payload: bytes, copy: dict[str, Any], name: str) 
     hard_edge = int(width * 0.46)
     veil = Image.new("RGBA", (panel_width, height), (0, 0, 0, 0))
     veil_pixels = veil.load()
+    panel = _theme_color(art_direction.get("panel"), (246, 250, 247))
+    ink = _theme_color(art_direction.get("ink"), (23, 49, 94))
+    accent = _theme_color(art_direction.get("accent"), (37, 169, 184))
     for x in range(panel_width):
         if x <= hard_edge:
             alpha = 255
@@ -364,12 +411,12 @@ def _overlay_poster_typography(payload: bytes, copy: dict[str, Any], name: str) 
         x_progress = x / max(1, panel_width - 1)
         for y in range(height):
             y_progress = y / max(1, height - 1)
-            # Subtle pale-aqua/white diagonal studio gradient keeps the
-            # reconstructed zone visually tied to the cosmetic scene.
+            # Product-conditioned panel palette prevents every campaign being
+            # reconstructed with the old universal pale-aqua veil.
             veil_pixels[x, y] = (
-                round(246 - 7 * y_progress + 3 * x_progress),
-                round(250 - 4 * y_progress + 2 * x_progress),
-                round(247 - 1 * y_progress + 4 * x_progress),
+                round(panel[0] - 7 * y_progress + 3 * x_progress),
+                round(panel[1] - 5 * y_progress + 2 * x_progress),
+                round(panel[2] - 4 * y_progress + 4 * x_progress),
                 alpha,
             )
     composited = image.convert("RGBA")
@@ -381,21 +428,22 @@ def _overlay_poster_typography(payload: bytes, copy: dict[str, Any], name: str) 
     y = padding
     identity = f"{copy['brand'].upper()} / {copy['product_name']}"
     identity_font = _fit_bundled_font(draw, identity, max_text_width, 31 if height > 800 else 28)
-    draw.text((padding, y), identity, font=identity_font, fill="#17315E")
+    draw.text((padding, y), identity, font=identity_font, fill=ink)
     y = draw.textbbox((padding, y), identity, font=identity_font)[3] + (22 if height > 800 else 16)
     title_font = _fit_bundled_font(draw, copy["titre"], max_text_width, 68 if height > 800 else 48, serif=copy.get("category") in {"perfume", "makeup"})
-    y = _draw_wrapped_text(draw, copy["titre"], (padding, y), title_font, "#172B4D", max_text_width)
+    y = _draw_wrapped_text(draw, copy["titre"], (padding, y), title_font, ink, max_text_width)
     y += 8
     body_font = _fit_bundled_font(draw, copy["sous_titre"], max_text_width, 27 if height > 800 else 22)
-    y = _draw_wrapped_text(draw, copy["sous_titre"], (padding, y), body_font, "#334E68", max_text_width, max_lines=3)
+    body_ink = tuple(round(component * 0.78 + 255 * 0.22) for component in ink)
+    y = _draw_wrapped_text(draw, copy["sous_titre"], (padding, y), body_font, body_ink, max_text_width, max_lines=3)
     for bullet in copy.get("bullets", [])[:3]:
         y += 6
-        draw.ellipse((padding, y + 7, padding + 8, y + 15), fill="#25A9B8")
-        y = _draw_wrapped_text(draw, bullet, (padding + 19, y), body_font, "#334E68", max_text_width - 19, max_lines=2)
+        draw.ellipse((padding, y + 7, padding + 8, y + 15), fill=accent)
+        y = _draw_wrapped_text(draw, bullet, (padding + 19, y), body_font, body_ink, max_text_width - 19, max_lines=2)
     cta_height = 48 if height > 800 else 42
     cta_width = min(max_text_width, 224 if height > 800 else 208)
     cta_y = min(y + 14, height - padding - cta_height)
-    draw.rounded_rectangle((padding, cta_y, padding + cta_width, cta_y + cta_height), radius=14, fill="#17315E")
+    draw.rounded_rectangle((padding, cta_y, padding + cta_width, cta_y + cta_height), radius=14, fill=ink)
     cta_font = _fit_bundled_font(draw, copy["cta"].upper(), max(1, cta_width - 32), 21 if height > 800 else 18)
     draw.text((padding + cta_width // 2, cta_y + cta_height // 2), copy["cta"].upper(), font=cta_font, fill="white", anchor="mm")
     output = io.BytesIO()
@@ -403,10 +451,12 @@ def _overlay_poster_typography(payload: bytes, copy: dict[str, Any], name: str) 
     return output.getvalue()
 
 
-def finalize_posters(members: dict[str, bytes], copy: dict[str, Any]) -> None:
+def finalize_posters(
+    members: dict[str, bytes], copy: dict[str, Any], art_direction: dict[str, Any]
+) -> None:
     """Replace untrusted baked text while preserving the right product region."""
     for name in _POSTER_FORMATS:
-        members[name] = _overlay_poster_typography(members[name], copy, name)
+        members[name] = _overlay_poster_typography(members[name], copy, name, art_direction)
 
 
 def _build_finalized_zip(members: dict[str, bytes]) -> bytes:
@@ -465,6 +515,8 @@ def validate_bundle(
     except (zipfile.BadZipFile, OSError) as exc:
         raise ArtifactContractError("response is not a readable ZIP") from exc
 
+    manifest = _strict_json(members["manifest.json"], "manifest.json")
+    art_direction = _validated_art_direction(manifest)
     copy = _strict_json(members["copy.json"], "copy.json")
     ocr = _strict_json(members["ocr.json"], "ocr.json")
     copy = finalize_copy(
@@ -477,8 +529,7 @@ def validate_bundle(
     # Store the canonical bytes, not the untrusted model JSON.  This is the
     # deterministic finalisation seam used by the existing worker/storage flow.
     members["copy.json"] = json.dumps(copy, ensure_ascii=False, indent=2).encode("utf-8")
-    finalize_posters(members, copy)
-    manifest = _strict_json(members["manifest.json"], "manifest.json")
+    finalize_posters(members, copy, art_direction)
     if manifest.get("pipeline_version") != PIPELINE_VERSION:
         raise ArtifactContractError("unsupported Colab pipeline version")
     if manifest.get("preserves_product_pixels") is not True:

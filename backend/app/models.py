@@ -173,6 +173,7 @@ class Generation(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     candidate_boxes: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
     copy_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    platform_captions: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     artifact_manifest: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     bundle_storage_key: Mapped[str | None] = mapped_column(String(500))
     bundle_checksum: Mapped[str | None] = mapped_column(String(64))
