@@ -276,14 +276,29 @@ class GenerationWorker:
             expected_input_snapshot_hash=generation_snapshot.input_snapshot_hash,
             expected_seed=generation_snapshot.seed,
             expected_language=generation_snapshot.language,
+            expected_product={
+                "brand": getattr(generation_snapshot.product, "brand", None),
+                "name": getattr(generation_snapshot.product, "name", None),
+                "category": getattr(generation_snapshot.product, "category", None),
+            },
+            expected_verified_claims=(
+                generation_snapshot.input_snapshot.get("generation", {}).get("verified_claims", [])
+                if isinstance(generation_snapshot.input_snapshot, dict)
+                else []
+            ),
             expected_source_size=(
                 generation_snapshot.product.original_width,
                 generation_snapshot.product.original_height,
             ),
             **target_expectation,
         )
+        finalized_bundle = (
+            getattr(validated, "finalized_bundle", None)
+            or getattr(validated, "bundle", None)
+            or bundle
+        )
         installed: GenerationInstall = storage.install_generation(
-            str(generation_id), bundle, validated.members
+            str(generation_id), finalized_bundle, validated.members
         )
         records = getattr(
             validated,

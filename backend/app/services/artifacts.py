@@ -1,14 +1,17 @@
-"""Validation for the six-member Colab campaign contract."""
+"""Validation and deterministic finalisation for Colab campaign bundles."""
 from __future__ import annotations
 
 import hashlib
 import io
 import json
+import math
+import re
 import zipfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 
 
 REQUIRED_ARCHIVE_FILES = frozenset(
@@ -16,15 +19,19 @@ REQUIRED_ARCHIVE_FILES = frozenset(
         "instagram.jpg",
         "facebook.jpg",
         "linkedin.jpg",
+        "cutout.png",
+        "mask.png",
+        "background.jpg",
         "copy.json",
         "ocr.json",
         "manifest.json",
     }
 )
-OPTIONAL_ARCHIVE_FILES = frozenset({"cutout.png", "mask.png", "background.jpg"})
+# Pipeline 1.2.0 promotes diagnostic images to evidence-bearing members.
+OPTIONAL_ARCHIVE_FILES = frozenset()
 ARTIFACT_NAMES = REQUIRED_ARCHIVE_FILES | OPTIONAL_ARCHIVE_FILES
 CHECKSUM_MEMBER_NAMES = ARTIFACT_NAMES
-PIPELINE_VERSION = "1.1.0"
+PIPELINE_VERSION = "1.2.0"
 MAX_BUNDLE_BYTES = 50 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 150 * 1024 * 1024
 
@@ -45,6 +52,12 @@ class ValidatedBundle:
     members: dict[str, bytes]
     records: dict[str, dict[str, Any]]
     checksum: str
+    finalized_bundle: bytes = b""
+
+    @property
+    def bundle(self) -> bytes:
+        """Compatibility alias for callers that call the result ``bundle``."""
+        return self.finalized_bundle
 
 
 def _strict_json(payload: bytes, name: str) -> dict[str, Any]:
@@ -65,7 +78,40 @@ def _strict_json(payload: bytes, name: str) -> dict[str, Any]:
     return value
 
 
-def _copy_contract(copy: dict[str, Any]) -> None:
+_ENGLISH_CREATIVE_TERMS = {"activated", "acivated", "all", "and", "care", "clean", "daily", "discover", "every", "feel", "for", "lasting", "motion", "protect", "with", "your"}
+_UNTRUSTED_OCR_FRAGMENTS = ("acivated", "oz alco", "o2 alco", "ocr typo")
+_CLAIM_TERMS = ("clinique", "dermatologique", "dermatologiquement", "guéri", "guÃ©ri", "guérit", "traite", "traitement")
+_CATEGORY_ALIASES = {
+    "dÃ©odorant": "deodorant", "déodorant": "deodorant", "deodorant": "deodorant",
+    "hygiène": "deodorant", "hygiene": "deodorant", "parfum": "perfume", "fragrance": "perfume",
+    "soin visage": "skincare", "soin_visage": "skincare", "skincare": "skincare",
+    "soin corps": "bodycare", "soin_corps": "bodycare", "body care": "bodycare", "bodycare": "bodycare",
+    "cheveux": "haircare", "haircare": "haircare", "hair": "haircare", "solaire": "sunscreen", "sunscreen": "sunscreen",
+}
+
+
+def _normalise_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").replace("\n", " ").strip())
+
+
+def _category_key(value: Any) -> str:
+    raw = _normalise_text(value).casefold().replace("-", " ")
+    return _CATEGORY_ALIASES.get(raw, raw)
+
+
+def _numeric_claims(value: str) -> set[str]:
+    claims: set[str] = set()
+    for match in re.finditer(r"\b(\d{1,4})\s*(h|hr|hrs|hour|hours|heure|heures|j|jour|jours|mois|an|ans)\b", value, flags=re.IGNORECASE):
+        unit = {"hr": "h", "hrs": "h", "hour": "h", "hours": "h", "heure": "h", "heures": "h", "jour": "j", "jours": "j", "ans": "an"}.get(match.group(2).casefold(), match.group(2).casefold())
+        claims.add(f"{match.group(1)}{unit}")
+    for match in re.finditer(r"\b(\d{1,3})\s*%", value):
+        claims.add(f"{match.group(1)}%")
+    for match in re.finditer(r"\b(?:spf|fps)\s*(\d{1,3})\b", value, flags=re.IGNORECASE):
+        claims.add(f"spf{match.group(1)}")
+    return claims
+
+
+def _copy_contract(copy: dict[str, Any], *, ocr: dict[str, Any] | None = None, expected_product: dict[str, Any] | None = None, expected_language: Any | None = None, expected_verified_claims: Any | None = None) -> None:
     required = {
         "brand",
         "product_name",
@@ -97,13 +143,106 @@ def _copy_contract(copy: dict[str, Any]) -> None:
         raise ArtifactContractError("copy.json _meta.ocr_text is required")
     if meta.get("source") != "ocr+metadata":
         raise ArtifactContractError("copy.json _meta.source must be ocr+metadata")
+    if ocr is not None:
+        ocr_text = _normalise_text(ocr.get("text"))
+        if not ocr_text or _normalise_text(meta["ocr_text"]) != ocr_text:
+            raise ArtifactContractError("copy.json OCR provenance does not match ocr.json")
+        items = ocr.get("items", [])
+        if not isinstance(items, list):
+            raise ArtifactContractError("ocr.json items must be an array")
+        for item in items:
+            confidence = item.get("confidence", 0.0) if isinstance(item, dict) else -1
+            if not isinstance(item, dict) or not _normalise_text(item.get("text")) or not isinstance(confidence, (int, float)) or not math.isfinite(float(confidence)) or not 0 <= float(confidence) <= 1:
+                raise ArtifactContractError("ocr.json contains an invalid evidence item")
+    if expected_product:
+        expected_brand = expected_product.get("brand")
+        expected_name = expected_product.get("name", expected_product.get("product_name"))
+        expected_category = expected_product.get("category")
+        if expected_brand and copy["brand"].casefold() != str(expected_brand).strip().casefold():
+            raise ArtifactContractError("copy.json brand does not match the product")
+        if expected_name and copy["product_name"].casefold() != str(expected_name).strip().casefold():
+            raise ArtifactContractError("copy.json product name does not match the product")
+        if expected_category and _category_key(copy["category"]) != _category_key(expected_category):
+            raise ArtifactContractError("copy.json category does not match the product")
     lowered = json.dumps(copy, ensure_ascii=False).casefold()
     for placeholder in ("maison exemple", "example brand", "hydra glow serum"):
         if placeholder in lowered:
             raise ArtifactContractError("copy.json contains placeholder copy")
+    creative = " ".join([copy["titre"], copy["sous_titre"], *copy["bullets"], copy["cta"]])
+    creative_lowered = creative.casefold()
+    if any(fragment in creative_lowered for fragment in _UNTRUSTED_OCR_FRAGMENTS):
+        raise ArtifactContractError("copy.json contains OCR garbage in creative text")
+    # The poster header already renders brand/product. Repeating the product
+    # name in the title is a known model failure and causes visual duplication.
+    if copy["product_name"].casefold() in copy["titre"].casefold():
+        raise ArtifactContractError("copy.json title repeats the product identity")
+    language = getattr(expected_language, "value", expected_language)
+    if str(language or "").casefold().split("-", 1)[0] == "fr" and set(re.findall(r"[a-z]+", creative_lowered)) & _ENGLISH_CREATIVE_TERMS:
+        raise ArtifactContractError("copy.json French creative contains English OCR text")
+    evidence_text = str(meta["ocr_text"]).casefold()
+    if expected_verified_claims:
+        if isinstance(expected_verified_claims, (list, tuple, set, frozenset)):
+            evidence_text += " " + " ".join(str(item) for item in expected_verified_claims)
+        else:
+            evidence_text += " " + str(expected_verified_claims)
+    for claim in _CLAIM_TERMS:
+        if claim in lowered and claim not in evidence_text:
+            raise ArtifactContractError("copy.json contains an unsupported claim")
+    if _numeric_claims(creative_lowered) - _numeric_claims(evidence_text):
+        raise ArtifactContractError("copy.json contains an unsupported numeric claim")
     for claim in ("clinique", "dermatologique", "guérit", "traite"):
         if claim in lowered and claim not in meta["ocr_text"].casefold():
             raise ArtifactContractError("copy.json contains an unsupported claim")
+
+
+_SAFE_FRENCH_COPY = {
+    "deodorant": ("Fraîcheur au quotidien", "Une sensation propre et légère.", "Découvrir"),
+    "perfume": ("Une signature au quotidien", "Un geste parfumé, simple et élégant.", "Découvrir"),
+    "skincare": ("Un geste essentiel", "Une routine soin simple et agréable.", "Découvrir"),
+    "haircare": ("Soin au quotidien", "Un geste simple pour votre routine.", "Découvrir"),
+    "bodycare": ("Confort au quotidien", "Un geste soin simple et agréable.", "Découvrir"),
+}
+
+
+def finalize_copy(copy: dict[str, Any], ocr: dict[str, Any], *, expected_product: dict[str, Any] | None = None, expected_language: Any | None = None, expected_verified_claims: Any | None = None) -> dict[str, Any]:
+    """Repair only unsafe creative text using a local, deterministic template."""
+    try:
+        _copy_contract(copy, ocr=ocr, expected_product=expected_product, expected_language=expected_language, expected_verified_claims=expected_verified_claims)
+        checked = dict(copy)
+        checked["_meta"] = {**dict(copy["_meta"]), "finalized_by": "backend-deterministic-v1"}
+        return checked
+    except ArtifactContractError as exc:
+        message = str(exc)
+        if not any(marker in message for marker in ("OCR garbage", "repeats the product", "French creative", "unsupported claim", "unsupported numeric")):
+            raise
+    expected_product = expected_product or {}
+    brand = str(expected_product.get("brand") or copy.get("brand") or "").strip()
+    product_name = str(expected_product.get("name") or expected_product.get("product_name") or copy.get("product_name") or "").strip()
+    category = _category_key(expected_product.get("category") or copy.get("category") or "cosmetics")
+    language = getattr(expected_language, "value", expected_language)
+    if str(language or "fr").casefold().split("-", 1)[0] != "fr":
+        raise ArtifactContractError("copy.json creative cannot be repaired for this language")
+    title, subtitle, cta = _SAFE_FRENCH_COPY.get(category.casefold(), ("Un geste au quotidien", "Une routine simple et agréable.", "Découvrir"))
+    repaired = {
+        "brand": brand,
+        "product_name": product_name,
+        "category": category,
+        "titre": title,
+        "sous_titre": subtitle,
+        "bullets": [],
+        "cta": cta,
+        "hashtags": [tag for tag in copy.get("hashtags", []) if isinstance(tag, str) and tag.strip()][:5],
+        "_meta": {
+            "ocr_text": _normalise_text(ocr.get("text")),
+            "source": "ocr+metadata",
+            "finalized_by": "backend-deterministic-v1",
+            "finalization_reason": "unsafe_creative_repaired",
+        },
+    }
+    if not repaired["hashtags"] and brand:
+        repaired["hashtags"] = [f"#{re.sub(r'[^A-Za-z0-9]', '', brand)}"]
+    _copy_contract(repaired, ocr=ocr, expected_product=expected_product, expected_language=expected_language, expected_verified_claims=expected_verified_claims)
+    return repaired
 
 
 def _image_record(name: str, payload: bytes) -> dict[str, Any]:
@@ -143,6 +282,148 @@ def _image_record(name: str, payload: bytes) -> dict[str, Any]:
     }
 
 
+_POSTER_FORMATS = {
+    "instagram.jpg": (1080, 1080),
+    "facebook.jpg": (1200, 630),
+    "linkedin.jpg": (1200, 627),
+}
+
+
+def _bundled_font(size: int, *, serif: bool = False) -> ImageFont.FreeTypeFont:
+    filename = "CormorantGaramond-VariableFont_wght.ttf" if serif else "Manrope-VariableFont_wght.ttf"
+    roots = (
+        Path(__file__).resolve().parents[1] / "assets" / "fonts",
+        Path(__file__).resolve().parents[3] / "ai" / "assets" / "fonts",
+    )
+    for root in roots:
+        candidate = root / filename
+        if candidate.is_file():
+            try:
+                return ImageFont.truetype(str(candidate), size=size)
+            except OSError:
+                continue
+    raise ArtifactContractError(f"bundled typography font is unavailable: {filename}")
+
+
+def _fit_bundled_font(draw: ImageDraw.ImageDraw, text: str, max_width: int, start_size: int, *, serif: bool = False) -> ImageFont.FreeTypeFont:
+    for size in range(start_size, 13, -2):
+        font = _bundled_font(size, serif=serif)
+        if draw.textbbox((0, 0), text, font=font)[2] <= max_width:
+            return font
+    return _bundled_font(13, serif=serif)
+
+
+def _draw_wrapped_text(draw: ImageDraw.ImageDraw, text: str, xy: tuple[int, int], font: ImageFont.FreeTypeFont, fill: str, max_width: int, max_lines: int = 3) -> int:
+    x, y = xy
+    lines: list[str] = []
+    current = ""
+    for word in str(text).split():
+        candidate = word if not current else f"{current} {word}"
+        if draw.textbbox((0, 0), candidate, font=font)[2] <= max_width:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+            current = word
+            if len(lines) >= max_lines:
+                break
+    if current and len(lines) < max_lines:
+        lines.append(current)
+    for line in lines[:max_lines]:
+        draw.text((x, y), line, font=font, fill=fill)
+        y = draw.textbbox((x, y), line, font=font)[3] + 6
+    return y
+
+
+def _overlay_poster_typography(payload: bytes, copy: dict[str, Any], name: str) -> bytes:
+    expected_size = _POSTER_FORMATS[name]
+    try:
+        image = Image.open(io.BytesIO(payload)).convert("RGB")
+    except (OSError, UnidentifiedImageError) as exc:
+        raise ArtifactContractError(f"{name} is not a readable poster") from exc
+    if image.size != expected_size:
+        raise ArtifactContractError(f"{name} must be exactly {expected_size[0]}x{expected_size[1]}")
+
+    width, height = image.size
+    # Colab's renderer reserves the left editorial veil for copy and anchors
+    # the untouched product on the right. Paint only this veil; x >= 60% is a
+    # protected product region and is never painted by finalisation.
+    panel_width = int(width * 0.58)
+    # Reconstruct the copy zone rather than painting a translucent wash over
+    # stale glyphs. The first 46% is opaque so old identity/headline/CTA pixels
+    # cannot ghost through; only the final 12% feathers back into the scene.
+    hard_edge = int(width * 0.46)
+    veil = Image.new("RGBA", (panel_width, height), (0, 0, 0, 0))
+    veil_pixels = veil.load()
+    for x in range(panel_width):
+        if x <= hard_edge:
+            alpha = 255
+        else:
+            progress = (x - hard_edge) / max(1, panel_width - hard_edge - 1)
+            alpha = round(255 * ((1 - progress) ** 1.8))
+        x_progress = x / max(1, panel_width - 1)
+        for y in range(height):
+            y_progress = y / max(1, height - 1)
+            # Subtle pale-aqua/white diagonal studio gradient keeps the
+            # reconstructed zone visually tied to the cosmetic scene.
+            veil_pixels[x, y] = (
+                round(246 - 7 * y_progress + 3 * x_progress),
+                round(250 - 4 * y_progress + 2 * x_progress),
+                round(247 - 1 * y_progress + 4 * x_progress),
+                alpha,
+            )
+    composited = image.convert("RGBA")
+    composited.alpha_composite(veil, (0, 0))
+    image = composited.convert("RGB")
+    draw = ImageDraw.Draw(image)
+    padding = int(width * 0.06)
+    max_text_width = max(80, int(width * 0.42) - padding * 2)
+    y = padding
+    identity = f"{copy['brand'].upper()} / {copy['product_name']}"
+    identity_font = _fit_bundled_font(draw, identity, max_text_width, 31 if height > 800 else 28)
+    draw.text((padding, y), identity, font=identity_font, fill="#17315E")
+    y = draw.textbbox((padding, y), identity, font=identity_font)[3] + (22 if height > 800 else 16)
+    title_font = _fit_bundled_font(draw, copy["titre"], max_text_width, 68 if height > 800 else 48, serif=copy.get("category") in {"perfume", "makeup"})
+    y = _draw_wrapped_text(draw, copy["titre"], (padding, y), title_font, "#172B4D", max_text_width)
+    y += 8
+    body_font = _fit_bundled_font(draw, copy["sous_titre"], max_text_width, 27 if height > 800 else 22)
+    y = _draw_wrapped_text(draw, copy["sous_titre"], (padding, y), body_font, "#334E68", max_text_width, max_lines=3)
+    for bullet in copy.get("bullets", [])[:3]:
+        y += 6
+        draw.ellipse((padding, y + 7, padding + 8, y + 15), fill="#25A9B8")
+        y = _draw_wrapped_text(draw, bullet, (padding + 19, y), body_font, "#334E68", max_text_width - 19, max_lines=2)
+    cta_height = 48 if height > 800 else 42
+    cta_width = min(max_text_width, 224 if height > 800 else 208)
+    cta_y = min(y + 14, height - padding - cta_height)
+    draw.rounded_rectangle((padding, cta_y, padding + cta_width, cta_y + cta_height), radius=14, fill="#17315E")
+    cta_font = _fit_bundled_font(draw, copy["cta"].upper(), max(1, cta_width - 32), 21 if height > 800 else 18)
+    draw.text((padding + cta_width // 2, cta_y + cta_height // 2), copy["cta"].upper(), font=cta_font, fill="white", anchor="mm")
+    output = io.BytesIO()
+    image.save(output, format="JPEG", quality=95, optimize=True)
+    return output.getvalue()
+
+
+def finalize_posters(members: dict[str, bytes], copy: dict[str, Any]) -> None:
+    """Replace untrusted baked text while preserving the right product region."""
+    for name in _POSTER_FORMATS:
+        members[name] = _overlay_poster_typography(members[name], copy, name)
+
+
+def _build_finalized_zip(members: dict[str, bytes]) -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name in sorted(members):
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            info.external_attr = 0o600 << 16
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, members[name])
+    finalized = output.getvalue()
+    if len(finalized) > MAX_BUNDLE_BYTES:
+        raise ArtifactContractError("finalized ZIP size is invalid")
+    return finalized
+
+
 def validate_bundle(
     bundle: bytes,
     *,
@@ -152,6 +433,8 @@ def validate_bundle(
     expected_input_snapshot_hash: str | None = None,
     expected_seed: int | None = None,
     expected_language: Any | None = None,
+    expected_product: dict[str, Any] | None = None,
+    expected_verified_claims: Any | None = None,
     expected_source_size: tuple[int, int] | None = None,
     expected_target_selection: Any = None,
     require_target_selection: bool = False,
@@ -183,13 +466,40 @@ def validate_bundle(
         raise ArtifactContractError("response is not a readable ZIP") from exc
 
     copy = _strict_json(members["copy.json"], "copy.json")
-    _copy_contract(copy)
     ocr = _strict_json(members["ocr.json"], "ocr.json")
+    copy = finalize_copy(
+        copy,
+        ocr,
+        expected_product=expected_product,
+        expected_language=expected_language,
+        expected_verified_claims=expected_verified_claims,
+    )
+    # Store the canonical bytes, not the untrusted model JSON.  This is the
+    # deterministic finalisation seam used by the existing worker/storage flow.
+    members["copy.json"] = json.dumps(copy, ensure_ascii=False, indent=2).encode("utf-8")
+    finalize_posters(members, copy)
     manifest = _strict_json(members["manifest.json"], "manifest.json")
     if manifest.get("pipeline_version") != PIPELINE_VERSION:
         raise ArtifactContractError("unsupported Colab pipeline version")
     if manifest.get("preserves_product_pixels") is not True:
         raise ArtifactContractError("manifest does not prove product-pixel preservation")
+    if manifest.get("copy_language") is not None and manifest.get("copy_language") != manifest.get("language"):
+        raise ArtifactContractError("manifest copy language does not match result language")
+    if manifest.get("text_rendering") not in {None, "Pillow"}:
+        raise ArtifactContractError("manifest does not prove deterministic text rendering")
+    target_source = manifest.get("target_box_source")
+    if target_source not in {None, "automatic", "manual"}:
+        raise ArtifactContractError("manifest target selection provenance is invalid")
+    target_box = manifest.get("target_box")
+    if target_box is not None:
+        if not isinstance(target_box, dict) or target_box.get("type") != "box":
+            raise ArtifactContractError("manifest target_box is invalid")
+        try:
+            coordinates = [float(target_box[key]) for key in ("x", "y", "width", "height")]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ArtifactContractError("manifest target_box is invalid") from exc
+        if not all(math.isfinite(value) for value in coordinates) or coordinates[0] < 0 or coordinates[1] < 0 or coordinates[2] <= 0 or coordinates[3] <= 0 or coordinates[0] + coordinates[2] > 1 or coordinates[1] + coordinates[3] > 1:
+            raise ArtifactContractError("manifest target_box is invalid")
     for key, expected in (
         ("runtime_id", expected_runtime_id),
         ("generation_id", expected_generation_id),
@@ -199,8 +509,24 @@ def validate_bundle(
     ):
         if expected is not None and manifest.get(key) != expected:
             raise ArtifactContractError(f"manifest {key} does not match the database request")
-    if expected_language is not None and manifest.get("language") not in {expected_language, getattr(expected_language, "value", None)}:
+    if expected_language is not None and manifest.get("language") not in (expected_language, getattr(expected_language, "value", None)):
         raise ArtifactContractError("manifest language does not match the request")
+    if expected_target_selection is not None and manifest.get("target_box") != expected_target_selection:
+        raise ArtifactContractError("manifest target selection does not match the request")
+    # Automatic rembg selection is valid without a normalized box; an explicit
+    # manual hint, however, must round-trip in the manifest exactly.
+    if require_target_selection and manifest.get("target_box") is None and target_source != "automatic":
+        raise ArtifactContractError("manifest is missing target selection evidence")
+
+    # Persist an explicit local-finalization provenance marker in the stored
+    # manifest. This records that no remote model or external image service was
+    # used to repair copy/typography after the Colab response arrived.
+    manifest["backend_finalization"] = {
+        "version": "deterministic-v1",
+        "copy": "canonicalized",
+        "typography": "Pillow",
+    }
+    members["manifest.json"] = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
 
     records: dict[str, dict[str, Any]] = {}
     for name in sorted(REQUIRED_ARCHIVE_FILES | (OPTIONAL_ARCHIVE_FILES & set(members))):
@@ -215,12 +541,42 @@ def validate_bundle(
                 "width": None,
                 "height": None,
             }
-    manifest = {**manifest, "artifacts": [records[name] for name in sorted(records)]}
+    if records["cutout.png"]["width"] != records["mask.png"]["width"] or records["cutout.png"]["height"] != records["mask.png"]["height"]:
+        raise ArtifactContractError("cutout.png and mask.png dimensions must match")
+    # Newer runtimes may include a self-described artifact table.  If present,
+    # compare it against bytes just read; never trust a remote checksum.
+    declared = manifest.get("artifacts")
+    if declared is not None:
+        if not isinstance(declared, list):
+            raise ArtifactContractError("manifest artifacts must be an array")
+        by_name = {item.get("name"): item for item in declared if isinstance(item, dict)}
+        if set(by_name) != set(records):
+            raise ArtifactChecksumMismatch("manifest artifact list does not match ZIP members")
+        for name, record in records.items():
+            remote = by_name[name]
+            if remote.get("sha256") not in {None, record["sha256"]} or remote.get("bytes") not in {None, record["bytes"]}:
+                raise ArtifactChecksumMismatch(f"manifest checksum mismatch for {name}")
+    # Include every finalized artifact. The manifest entry intentionally omits
+    # sha256/bytes because either value would be self-referential after update.
+    manifest_artifacts = [records[name] for name in sorted(records) if name != "manifest.json"]
+    manifest_artifacts.append({"name": "manifest.json", "mime": "application/json", "width": None, "height": None})
+    manifest = {
+        **manifest,
+        "artifacts": manifest_artifacts,
+    }
+    members["manifest.json"] = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+    records["manifest.json"] = {
+        **records["manifest.json"],
+        "sha256": hashlib.sha256(members["manifest.json"]).hexdigest(),
+        "bytes": len(members["manifest.json"]),
+    }
+    finalized_bundle = _build_finalized_zip(members)
     return ValidatedBundle(
         manifest=manifest,
         copy=copy,
         ocr=ocr,
         members=members,
         records=records,
-        checksum=hashlib.sha256(bundle).hexdigest(),
+        checksum=hashlib.sha256(finalized_bundle).hexdigest(),
+        finalized_bundle=finalized_bundle,
     )

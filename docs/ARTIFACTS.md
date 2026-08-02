@@ -3,24 +3,22 @@
 The worker accepts a campaign only after validating the complete ZIP as one
 atomic result. Partial assets are never promoted as a successful generation.
 
-## Required members
+## Required members (pipeline 1.2.0)
 
 ```text
 instagram.jpg
 facebook.jpg
 linkedin.jpg
+cutout.png
+mask.png
+background.jpg
 copy.json
 ocr.json
 manifest.json
 ```
 
-Optional diagnostic members are accepted when present:
-
-```text
-cutout.png
-mask.png
-background.jpg
-```
+The cutout, mask, and background are evidence-bearing members rather than
+optional diagnostics. A bundle missing any of the nine members is not promoted.
 
 All members must be root-level, unique, unencrypted, under the size limits, and
 free of path traversal or unknown filenames.

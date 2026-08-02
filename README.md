@@ -38,9 +38,11 @@ Each campaign ZIP contains:
 - `linkedin.jpg` — 1200×627
 - `copy.json` — strict brand/product/category/titre/sous-titre/bullets/CTA/hashtags contract
 - `ocr.json` — OCR text and confidence values
-- `manifest.json` — models, category, seed, and product-pixel preservation flag
+- `cutout.png`, `mask.png`, `background.jpg` — product-isolation evidence
+- `manifest.json` — models, category, seed, provenance, and product-pixel preservation flag
 
-Diagnostic cutout, mask, and background images may also be included.
+All nine members are required by the website's pipeline 1.2.0 finalization
+contract; partial or diagnostic-only ZIPs are never delivered.
 
 ## Colab API
 

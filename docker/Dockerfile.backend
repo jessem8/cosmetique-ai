@@ -15,6 +15,9 @@ COPY ai_core/ /tmp/ai_core/
 RUN pip install --no-deps /tmp/ai_core \
     && rm -rf /tmp/ai_core
 COPY backend/ .
+# Deterministic backend poster finalisation uses the same licensed bundled
+# faces as Colab; keep them in the model-free image (no system-font fallback).
+COPY ai/assets/fonts/ /app/app/assets/fonts/
 
 RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /app/artifacts \

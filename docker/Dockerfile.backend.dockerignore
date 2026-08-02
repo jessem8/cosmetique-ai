@@ -3,6 +3,10 @@
 !backend/**
 !ai_core/
 !ai_core/**
+!ai/
+!ai/assets/
+!ai/assets/fonts/
+!ai/assets/fonts/**
 !docker/
 !docker/Dockerfile.backend
 backend/.venv/
