@@ -19,6 +19,8 @@ import json
 import math
 import os
 import re
+import socket
+import threading
 import time
 from importlib import metadata as importlib_metadata
 from pathlib import Path
@@ -993,7 +995,21 @@ except ImportError:
     app = None
 
 
-def run_public_server(port: int = 8000) -> str:
+_PUBLIC_SERVER_LOCK = threading.Lock()
+_PUBLIC_SERVER_THREAD: threading.Thread | None = None
+_PUBLIC_SERVER: Any | None = None
+
+
+def _port_is_listening(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def run_public_server(port: int = 8000, *, rotate_service_token: bool = False) -> str:
+    """Expose the FastAPI app without conflicting with Colab's notebook event loop."""
     try:
         from pyngrok import ngrok
         import uvicorn
@@ -1005,16 +1021,34 @@ def run_public_server(port: int = 8000) -> str:
         raise PipelineError("Set NGROK_AUTHTOKEN before opening the ngrok tunnel")
 
     service_token = os.getenv("COLAB_AI_TOKEN", os.getenv("AI_SERVICE_TOKEN", "")).strip()
-    if not service_token:
+    if rotate_service_token or not service_token:
         import secrets
         service_token = secrets.token_urlsafe(48)
         os.environ["COLAB_AI_TOKEN"] = service_token
+
+    global _PUBLIC_SERVER, _PUBLIC_SERVER_THREAD
+    with _PUBLIC_SERVER_LOCK:
+        if not _port_is_listening(port):
+            config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+            _PUBLIC_SERVER = uvicorn.Server(config)
+            _PUBLIC_SERVER_THREAD = threading.Thread(
+                target=_PUBLIC_SERVER.run,
+                name="cosmetique-colab-api",
+                daemon=True,
+            )
+            _PUBLIC_SERVER_THREAD.start()
+
+    for _ in range(50):
+        if _port_is_listening(port):
+            break
+        time.sleep(0.1)
+    else:
+        raise PipelineError(f"Colab API did not start on port {port}")
 
     ngrok.set_auth_token(token)
     public_url = ngrok.connect(str(port), "http").public_url
     print(f"Colab API: {public_url}")
     print(f"COLAB_AI_TOKEN: {service_token}")
-    uvicorn.run(app, host="0.0.0.0", port=port)
     return public_url
 
 
