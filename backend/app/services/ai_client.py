@@ -60,12 +60,7 @@ class AIClient:
         if not value.startswith(("https://", "http://")):
             raise ValueError("COLAB_AI_URL invalide.")
         self.base_url = value
-        headers = {
-            "Accept": "application/json",
-            # Free ngrok endpoints can otherwise return their HTML browser
-            # interstitial instead of forwarding an API request.
-            "ngrok-skip-browser-warning": "1",
-        }
+        headers = {"Accept": "application/json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
         self._client = httpx.Client(
