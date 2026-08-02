@@ -1081,6 +1081,14 @@ def run_public_server(port: int = 8000, *, rotate_service_token: bool = False) -
         raise PipelineError(f"Colab API did not start on port {port}")
 
     ngrok.set_auth_token(token)
+    # Colab cells survive code reloads.  Without closing an earlier tunnel,
+    # ngrok can keep forwarding the public endpoint to a stale Uvicorn port.
+    # Always expose exactly the server started by this call.
+    for tunnel in ngrok.get_tunnels():
+        try:
+            ngrok.disconnect(tunnel.public_url)
+        except Exception:
+            pass
     public_url = ngrok.connect(str(port), "http").public_url
     print(f"Colab API: {public_url}")
     print(f"COLAB_AI_TOKEN: {service_token}")
