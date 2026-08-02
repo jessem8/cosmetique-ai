@@ -18,7 +18,7 @@ FORMATS: dict[str, tuple[int, int]] = {
 }
 
 CATEGORY_STYLES: dict[str, str] = {
-    "deodorant": "wet pale-aqua bathroom surface, crisp water droplets, soft daylight, distant white towel texture, clean left-side negative space",
+    "deodorant": "pale-aqua wet bathroom shower scene with a clearly separated wall and counter surface, realistic condensation and crisp water droplets, soft cool daylight, distant folded white towel texture, subtle depth and contact shadows, clean left-side negative space",
     "perfume": "champagne and rose-gold luxury fragrance scene, glossy reflective surface and warm diffused light",
     "makeup": "editorial beauty scene, satin surface, restrained rose-gold reflections and soft studio light",
     "skincare": "clean premium spa scene, pale marble, soft white daylight and calm neutral textures",
@@ -312,6 +312,8 @@ def build_inpaint_prompt(category: str) -> str:
         "Leave generous clean negative space for deterministic typography. "
         "Realistic commercial lighting, physically plausible surface contact, "
         "soft contact shadow, natural reflections, high-end campaign photography. "
+        "The environment must be visibly textured and category-specific, never a blank white studio, "
+        "featureless backdrop, flat color, or flat gradient. "
         "No text, no letters, no logo, no watermark, no fake package, no extra product, "
         "no vase, no fruit, no flowers, no unrelated props, no people, no hands, "
         "no floating object, no magenta generic studio."

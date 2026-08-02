@@ -33,6 +33,49 @@ def test_inpaint_prompt_forbids_repainting_packaging() -> None:
         assert forbidden in prompt
 
 
+def test_deodorant_inpaint_prompt_requires_a_visible_category_scene() -> None:
+    prompt = build_inpaint_prompt("deodorant").casefold()
+    for token in (
+        "pale-aqua",
+        "shower",
+        "wall and counter surface",
+        "condensation",
+        "water droplets",
+        "folded white towel",
+        "subtle depth",
+        "never a blank white studio",
+        "featureless backdrop",
+        "flat gradient",
+    ):
+        assert token in prompt
+
+
+def test_sdxl_negative_prompt_rejects_blank_environment(monkeypatch) -> None:
+    captured = {}
+
+    class FakeTorch:
+        class Generator:
+            def __init__(self, device):
+                pass
+
+            def manual_seed(self, seed):
+                return self
+
+        cuda = type("Cuda", (), {})()
+
+    class FakePipeline:
+        def __call__(self, **kwargs):
+            captured.update(kwargs)
+            return type("Result", (), {"images": [Image.new("RGB", (32, 32), "white")]})()
+
+    monkeypatch.setitem(__import__("sys").modules, "torch", FakeTorch)
+    monkeypatch.setattr(cosmetic_pipeline, "load_sdxl_inpaint_pipeline", lambda: FakePipeline())
+    cosmetic_pipeline.generate_environment(Image.new("RGB", (32, 32)), Image.new("L", (32, 32), 255), "deodorant")
+    negative = captured["negative_prompt"].casefold()
+    assert "blank white background" in negative
+    assert "flat gradient" in negative
+
+
 def test_copy_source_spacing_is_canonicalized() -> None:
     copy = {
         "brand": "Rexona",

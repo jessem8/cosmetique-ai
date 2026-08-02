@@ -517,7 +517,9 @@ def generate_environment(
     negative_prompt = (
         "text, letters, typography, logo, watermark, fake packaging, extra bottles, "
         "extra products, vase, fruit, flowers, people, hands, floating product, "
-        "magenta studio, unrelated props, distorted object, warped package"
+        "magenta studio, unrelated props, distorted object, warped package, "
+        "blank white background, empty white studio, featureless backdrop, "
+        "white cyclorama, flat gradient, flat color, washed-out environment"
     )
     generator = torch.Generator(device="cuda").manual_seed(seed)
     result = pipeline(
