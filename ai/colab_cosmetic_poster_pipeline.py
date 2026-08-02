@@ -1075,6 +1075,14 @@ def _port_is_listening(port: int) -> bool:
         return False
 
 
+def _next_available_port(start_port: int) -> int:
+    """Return a loopback port that is not occupied by an earlier Colab child."""
+    for candidate in range(start_port, start_port + 100):
+        if not _port_is_listening(candidate):
+            return candidate
+    raise PipelineError(f"No free API port found in range {start_port}-{start_port + 99}")
+
+
 def run_public_server(port: int = 8000, *, rotate_service_token: bool = False) -> str:
     """Expose the FastAPI app in a clean process outside Colab's event loop.
 
@@ -1101,31 +1109,35 @@ def run_public_server(port: int = 8000, *, rotate_service_token: bool = False) -
 
     global _PUBLIC_SERVER_PROCESS
     with _PUBLIC_SERVER_LOCK:
-        if not _port_is_listening(port):
-            repo_root = Path(__file__).resolve().parents[1]
-            log_path = Path("/content/cosmetique_ai_api.log")
-            log_handle = log_path.open("a", buffering=1)
-            child_env = os.environ.copy()
-            child_env["PYTHONPATH"] = str(repo_root) + os.pathsep + child_env.get("PYTHONPATH", "")
-            _PUBLIC_SERVER_PROCESS = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "uvicorn",
-                    "ai.colab_cosmetic_poster_pipeline:app",
-                    "--host",
-                    "0.0.0.0",
-                    "--port",
-                    str(port),
-                    "--log-level",
-                    "info",
-                ],
-                cwd=str(repo_root),
-                env=child_env,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
+        # A source-cell reload does not stop a prior child process.  Never
+        # silently reuse that process: select a fresh port so ngrok always
+        # points at the code just loaded by the notebook.
+        if _port_is_listening(port):
+            port = _next_available_port(port + 1)
+        repo_root = Path(__file__).resolve().parents[1]
+        log_path = Path("/content/cosmetique_ai_api.log")
+        log_handle = log_path.open("a", buffering=1)
+        child_env = os.environ.copy()
+        child_env["PYTHONPATH"] = str(repo_root) + os.pathsep + child_env.get("PYTHONPATH", "")
+        _PUBLIC_SERVER_PROCESS = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "uvicorn",
+                "ai.colab_cosmetic_poster_pipeline:app",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                str(port),
+                "--log-level",
+                "info",
+            ],
+            cwd=str(repo_root),
+            env=child_env,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
 
     for _ in range(50):
         if _port_is_listening(port):
