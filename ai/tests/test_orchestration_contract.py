@@ -15,7 +15,7 @@ def _source_png() -> bytes:
     return output.getvalue()
 
 
-def test_generate_campaign_zip_orchestrates_square_and_wide_scenes(monkeypatch) -> None:
+def test_generate_campaign_zip_uses_deterministic_square_and_wide_studios(monkeypatch) -> None:
     scene_calls: list[tuple[tuple[int, int], int]] = []
     prepare_calls: list[tuple[int, int]] = []
     render_calls: list[tuple[str, tuple[int, int]]] = []
@@ -81,14 +81,14 @@ def test_generate_campaign_zip_orchestrates_square_and_wide_scenes(monkeypatch) 
         request_context={"generation_id": "g-1", "request_id": "r-1"},
     )
 
-    assert scene_calls == [((1024, 1024), 42), ((1216, 640), 43)]
+    assert scene_calls == []
     assert prepare_calls == [(1024, 1024), (1216, 640)]
     assert render_calls == [
         ("instagram", (1024, 1024)),
         ("facebook", (1216, 640)),
         ("linkedin", (1216, 640)),
     ]
-    assert copy_calls == ["fr"]
+    assert copy_calls == []
 
     with ZipFile(io.BytesIO(archive)) as bundle:
         manifest = json.loads(bundle.read("manifest.json"))

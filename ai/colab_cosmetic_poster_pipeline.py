@@ -27,7 +27,7 @@ from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, Mapping
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 
 if __package__:
     from .campaign_core import (
@@ -540,6 +540,45 @@ def generate_environment(
     return result.convert("RGB")
 
 
+def deterministic_studio_background(
+    canvas_size: tuple[int, int], category: str
+) -> Image.Image:
+    """Build a text-free editorial backdrop without a generative model.
+
+    The final product cutout and all campaign typography are composited later
+    with Pillow.  This deliberately avoids SDXL inventing letters, logos, or
+    unrelated objects in a paid campaign asset.
+    """
+    width, height = canvas_size
+    palette = {
+        "deodorant": ((241, 248, 247), (205, 232, 231), (128, 191, 193)),
+        "perfume": ((248, 243, 239), (232, 214, 203), (183, 142, 126)),
+        "makeup": ((252, 244, 246), (242, 211, 221), (202, 131, 153)),
+    }
+    base, accent, line = palette.get(
+        normalize_category(category), ((246, 247, 245), (218, 229, 226), (143, 178, 174))
+    )
+    canvas = Image.new("RGB", canvas_size, base)
+    draw = ImageDraw.Draw(canvas, "RGBA")
+    # Keep the copy side calm; a few restrained geometric forms create depth
+    # solely on the product side, where no generated text can appear.
+    draw.ellipse(
+        (int(width * 0.52), int(-height * 0.16), int(width * 1.08), int(height * 0.56)),
+        fill=(*accent, 125),
+    )
+    draw.ellipse(
+        (int(width * 0.63), int(height * 0.42), int(width * 1.13), int(height * 1.12)),
+        fill=(*accent, 105),
+    )
+    draw.rounded_rectangle(
+        (int(width * 0.58), int(height * 0.10), int(width * 0.96), int(height * 0.90)),
+        radius=max(18, int(min(width, height) * 0.06)),
+        outline=(*line, 115),
+        width=max(2, int(min(width, height) * 0.004)),
+    )
+    return canvas
+
+
 def _ollama_content(response: Any) -> str:
     message = getattr(response, "message", None)
     if message is None and isinstance(response, Mapping):
@@ -722,26 +761,25 @@ def generate_campaign_zip(
     ocr = read_product_label(image, roi_images=roi_inputs)
     timings["ocr_seconds"] = round(time.perf_counter() - stage, 3)
     metadata = infer_product_metadata(ocr, metadata_overrides)
+    # Public campaign copy stays deterministic and fact-safe.  The optional
+    # Ollama helper remains available for preflight experiments, but never
+    # controls publishable creative in this fast, reliable render path.
     stage = time.perf_counter()
-    copy = generate_marketing_copy(ocr, metadata, metadata["tone"], language=language)
+    copy = _safe_marketing_copy(metadata, str(ocr.get("text", "")), language)
     timings["copy_seconds"] = round(time.perf_counter() - stage, 3)
 
     stage = time.perf_counter()
-    square_base, square_mask, square_product, square_position = prepare_inpainting_inputs(
+    _, _, square_product, square_position = prepare_inpainting_inputs(
         cutout, (1024, 1024)
     )
-    square_scene = generate_environment(
-        square_base, square_mask, metadata["category"], seed=seed
-    )
+    square_scene = deterministic_studio_background((1024, 1024), metadata["category"])
     timings["square_scene_seconds"] = round(time.perf_counter() - stage, 3)
 
     stage = time.perf_counter()
-    wide_base, wide_mask, wide_product, wide_position = prepare_inpainting_inputs(
+    _, _, wide_product, wide_position = prepare_inpainting_inputs(
         cutout, (1216, 640)
     )
-    wide_scene = generate_environment(
-        wide_base, wide_mask, metadata["category"], seed=seed + 1
-    )
+    wide_scene = deterministic_studio_background((1216, 640), metadata["category"])
     timings["wide_scene_seconds"] = round(time.perf_counter() - stage, 3)
 
     # The renderer receives the original rembg pixels, never the SDXL package.
@@ -795,9 +833,8 @@ def generate_campaign_zip(
         "models": {
             "background_removal": "isnet-general-use",
             "ocr": "PaddleOCR-lang-fr",
-            "background_generation": SDXL_INPAINT_MODEL,
-            "copy_generation": OLLAMA_MODEL,
-            "copy_generation_fallbacks": list(OLLAMA_FALLBACK_MODELS),
+            "background_generation": "deterministic-studio-v1",
+            "copy_generation": "deterministic-french-v1",
         },
         "seed": seed,
         "preserves_product_pixels": True,
