@@ -20,6 +20,8 @@ import math
 import os
 import re
 import socket
+import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -1052,8 +1054,7 @@ except ImportError:
 
 
 _PUBLIC_SERVER_LOCK = threading.Lock()
-_PUBLIC_SERVER_THREAD: threading.Thread | None = None
-_PUBLIC_SERVER: Any | None = None
+_PUBLIC_SERVER_PROCESS: Any | None = None
 
 
 def _port_is_listening(port: int) -> bool:
@@ -1065,10 +1066,16 @@ def _port_is_listening(port: int) -> bool:
 
 
 def run_public_server(port: int = 8000, *, rotate_service_token: bool = False) -> str:
-    """Expose the FastAPI app without conflicting with Colab's notebook event loop."""
+    """Expose the FastAPI app in a clean process outside Colab's event loop.
+
+    The notebook kernel has a running asyncio loop; more importantly, CUDA and
+    Paddle sessions created in a daemon Uvicorn thread can fail on their first
+    real inference even when an interactive notebook preflight succeeds.  A
+    fresh child process owns the web server and its model providers, while the
+    notebook remains responsive.
+    """
     try:
         from pyngrok import ngrok
-        import uvicorn
     except ImportError as exc:
         raise PipelineError("Install pyngrok and uvicorn before starting the public service") from exc
 
@@ -1082,24 +1089,45 @@ def run_public_server(port: int = 8000, *, rotate_service_token: bool = False) -
         service_token = secrets.token_urlsafe(48)
         os.environ["COLAB_AI_TOKEN"] = service_token
 
-    global _PUBLIC_SERVER, _PUBLIC_SERVER_THREAD
+    global _PUBLIC_SERVER_PROCESS
     with _PUBLIC_SERVER_LOCK:
         if not _port_is_listening(port):
-            config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
-            _PUBLIC_SERVER = uvicorn.Server(config)
-            _PUBLIC_SERVER_THREAD = threading.Thread(
-                target=_PUBLIC_SERVER.run,
-                name="cosmetique-colab-api",
-                daemon=True,
+            repo_root = Path(__file__).resolve().parents[1]
+            log_path = Path("/content/cosmetique_ai_api.log")
+            log_handle = log_path.open("a", buffering=1)
+            child_env = os.environ.copy()
+            child_env["PYTHONPATH"] = str(repo_root) + os.pathsep + child_env.get("PYTHONPATH", "")
+            _PUBLIC_SERVER_PROCESS = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "uvicorn",
+                    "ai.colab_cosmetic_poster_pipeline:app",
+                    "--host",
+                    "0.0.0.0",
+                    "--port",
+                    str(port),
+                    "--log-level",
+                    "info",
+                ],
+                cwd=str(repo_root),
+                env=child_env,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
             )
-            _PUBLIC_SERVER_THREAD.start()
 
     for _ in range(50):
         if _port_is_listening(port):
             break
         time.sleep(0.1)
     else:
-        raise PipelineError(f"Colab API did not start on port {port}")
+        details = ""
+        log_file = Path("/content/cosmetique_ai_api.log")
+        if log_file.is_file():
+            details = log_file.read_text(errors="replace")[-2000:]
+        message = f"Colab API did not start on port {port}"
+        raise PipelineError(message + (f": {details}" if details else ""))
 
     ngrok.set_auth_token(token)
     # Colab cells survive code reloads.  Without closing an earlier tunnel,
