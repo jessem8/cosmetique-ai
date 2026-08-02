@@ -25,6 +25,19 @@ def _valid_response() -> dict[str, object]:
     }
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("localhost:11434", "http://127.0.0.1:11434"),
+        ("0.0.0.0:11434", "http://127.0.0.1:11434"),
+        ("http://0.0.0.0:11434", "http://127.0.0.1:11434"),
+        ("http://127.0.0.1:11434/", "http://127.0.0.1:11434"),
+    ],
+)
+def test_ollama_host_is_a_valid_client_url(raw: str, expected: str) -> None:
+    assert pipeline.normalize_ollama_host(raw) == expected
+
+
 def test_copy_tries_configured_fallback_models(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 

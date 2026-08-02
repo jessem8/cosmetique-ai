@@ -46,11 +46,25 @@ else:
     )
 
 
+def normalize_ollama_host(value: str | None) -> str:
+    """Return a valid Ollama client URL, never a server bind address."""
+    host = (value or "").strip().rstrip("/") or "http://127.0.0.1:11434"
+    if not re.match(r"^https?://", host, flags=re.IGNORECASE):
+        host = f"http://{host}"
+    host = re.sub(
+        r"^(https?://)(?:0\.0\.0\.0|localhost|\[::\])(?=[:/]|$)",
+        r"\g<1>127.0.0.1",
+        host,
+        flags=re.IGNORECASE,
+    )
+    return host
+
+
 SDXL_INPAINT_MODEL = os.getenv(
     "SDXL_INPAINT_MODEL",
     "diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
 )
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+OLLAMA_HOST = normalize_ollama_host(os.getenv("OLLAMA_HOST"))
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_K_M")
 OLLAMA_FALLBACK_MODELS = tuple(
     model.strip()
@@ -60,7 +74,7 @@ OLLAMA_FALLBACK_MODELS = tuple(
     ).split(",")
     if model.strip()
 )
-PIPELINE_VERSION = "1.1.4"
+PIPELINE_VERSION = "1.1.5"
 RUNTIME_ID = os.getenv("COLAB_RUNTIME_ID", f"colab-runtime-{os.getpid()}")
 
 CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -442,7 +456,7 @@ La valeur _meta.source doit être exactement la chaîne "ocr+metadata".
         "Ne laisse jamais un champ texte obligatoire vide; le CTA doit être non vide."
     )
 
-    client = Client(host=OLLAMA_HOST)
+    client = Client(host=normalize_ollama_host(OLLAMA_HOST))
     configured_models = tuple(
         dict.fromkeys((OLLAMA_MODEL, *OLLAMA_FALLBACK_MODELS))
     )
@@ -461,6 +475,7 @@ La valeur _meta.source doit être exactement la chaîne "ocr+metadata".
                     format=_COPY_SCHEMA,
                     stream=False,
                     think=False,
+                    keep_alive=0,
                     options={"temperature": 0, "seed": 42, "num_ctx": 4096},
                 )
                 raw = _ollama_content(response)
@@ -497,10 +512,12 @@ def generate_campaign_zip(
     image = preprocess_image(image_bytes)
     ocr = read_product_label(image)
     metadata = infer_product_metadata(ocr, metadata_overrides)
+    # Validate the text subsystem before loading rembg/SDXL. A dead Ollama
+    # service now fails in seconds instead of after a full image generation.
+    copy = generate_marketing_copy(ocr, metadata, metadata["tone"])
     cutout, product_mask = remove_product_background(image)
     base, inpaint_mask, product, product_position = prepare_inpainting_inputs(cutout)
     scene = generate_environment(base, inpaint_mask, metadata["category"], seed=seed)
-    copy = generate_marketing_copy(ocr, metadata, metadata["tone"])
 
     # The renderer receives the original rembg pixels, never the SDXL package.
     posters = {
@@ -577,7 +594,7 @@ def runtime_ready() -> bool:
         import ollama
         if not torch.cuda.is_available():
             return False
-        tags = ollama.Client(host=OLLAMA_HOST).list()
+        tags = ollama.Client(host=normalize_ollama_host(OLLAMA_HOST)).list()
         models = (
             tags.get("models", [])
             if isinstance(tags, Mapping)
