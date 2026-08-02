@@ -103,7 +103,12 @@ class AIClient:
             raise
         except (httpx.HTTPError, ValidationError, ValueError) as exc:
             raise AIServiceUnavailable("Service Colab indisponible ou invalide.") from exc
-        if not payload.ready:
+        # The campaign endpoint is now fully deterministic after isolation:
+        # it does not depend on the optional Ollama copy service.  Older
+        # Colab health payloads still include Ollama in ``ready``; accept a
+        # reachable GPU runtime so that stale optional-model state cannot
+        # block a safe campaign render.
+        if not payload.ready and not bool(payload.gpu):
             raise AIServiceUnavailable("Le runtime GPU Colab n'est pas prêt.")
         return payload
 

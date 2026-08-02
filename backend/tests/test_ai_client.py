@@ -66,3 +66,23 @@ def test_client_fails_when_colab_is_unavailable() -> None:
             pass
         else:
             raise AssertionError("unavailable Colab was accepted")
+
+
+def test_client_accepts_gpu_runtime_when_optional_ollama_is_not_ready() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "status": "ok",
+                "ready": False,
+                "runtime_id": "runtime-test",
+                "pipeline_version": "1.2.0",
+                "gpu": True,
+            },
+        )
+
+    with AIClient(
+        base_url="https://colab.example",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        assert client.health().runtime_id == "runtime-test"
