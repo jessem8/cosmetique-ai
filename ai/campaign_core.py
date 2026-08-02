@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import re
 import textwrap
 from pathlib import Path
@@ -17,7 +18,7 @@ FORMATS: dict[str, tuple[int, int]] = {
 }
 
 CATEGORY_STYLES: dict[str, str] = {
-    "deodorant": "fresh aqua bathroom, clean white surface, water droplets and soft blue light",
+    "deodorant": "wet pale-aqua bathroom surface, crisp water droplets, soft daylight, distant white towel texture, clean left-side negative space",
     "perfume": "champagne and rose-gold luxury fragrance scene, glossy reflective surface and warm diffused light",
     "makeup": "editorial beauty scene, satin surface, restrained rose-gold reflections and soft studio light",
     "skincare": "clean premium spa scene, pale marble, soft white daylight and calm neutral textures",
@@ -79,21 +80,54 @@ CLAIM_TERMS = {
     "resultat clinique",
 }
 
+_BUNDLED_FONT_ROOT = Path(__file__).resolve().parent
 _FONT_CANDIDATES = {
+    # Keep every candidate inside the repository.  A host/system font can
+    # differ across Colab, Windows, and Docker and may not contain French
+    # accents, so silently falling back to one would make campaign output
+    # non-reproducible.
     "regular": [
-        "C:/Windows/Fonts/arial.ttf",
-        "C:/Windows/Fonts/calibri.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        str(_BUNDLED_FONT_ROOT / "assets" / "fonts" / "Manrope-VariableFont_wght.ttf"),
     ],
     "bold": [
-        "C:/Windows/Fonts/arialbd.ttf",
-        "C:/Windows/Fonts/calibrib.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        str(_BUNDLED_FONT_ROOT / "assets" / "fonts" / "Manrope-VariableFont_wght.ttf"),
     ],
     "serif": [
-        "C:/Windows/Fonts/times.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        str(_BUNDLED_FONT_ROOT / "assets" / "fonts" / "CormorantGaramond-VariableFont_wght.ttf"),
     ],
+}
+
+_ENGLISH_COPY_TERMS = {
+    "all",
+    "adopt",
+    "and",
+    "beauty",
+    "care",
+    "clean",
+    "daily",
+    "day",
+    "discover",
+    "every",
+    "feel",
+    "fresh",
+    "freshness",
+    "for",
+    "glow",
+    "hair",
+    "lasting",
+    "light",
+    "long",
+    "more",
+    "new",
+    "protect",
+    "pure",
+    "skin",
+    "soft",
+    "the",
+    "this",
+    "try",
+    "with",
+    "your",
 }
 
 
@@ -118,6 +152,66 @@ def _word_count(value: str) -> int:
 def _contains_placeholder(value: str) -> bool:
     normalized = value.casefold().strip()
     return any(item in normalized for item in PLACEHOLDERS)
+
+
+def _contains_clearly_english_creative(
+    values: list[str],
+    ignored_tokens: set[str] | None = None,
+) -> bool:
+    """Detect unmistakably English creative phrases without judging OCR names."""
+
+    tokens = {
+        token
+        for value in values
+        for token in re.findall(r"[a-z]+", value.casefold())
+    }
+    # Product and brand names can legitimately be English (for example,
+    # ``Shower Fresh``), so callers pass only generated creative fields here.
+    return bool((tokens - (ignored_tokens or set())) & _ENGLISH_COPY_TERMS)
+
+
+def _numeric_claims(value: str) -> set[str]:
+    """Return canonical duration, percentage, and SPF claims from text."""
+
+    claims: set[str] = set()
+    for match in re.finditer(
+        r"\b(\d{1,4})\s*(h|hr|hrs|hour|hours|heure|heures|j|jour|jours|mois|an|ans)\b",
+        value,
+        flags=re.IGNORECASE,
+    ):
+        unit = match.group(2).casefold()
+        unit = {
+            "hr": "h",
+            "hrs": "h",
+            "hour": "h",
+            "hours": "h",
+            "heure": "h",
+            "heures": "h",
+            "jour": "j",
+            "jours": "j",
+            "ans": "an",
+        }.get(unit, unit)
+        claims.add(f"{match.group(1)}{unit}")
+    for match in re.finditer(
+        r"\b(\d{1,3})(?:\s*%|\s*(?:percent|pourcent)(?![a-z]))",
+        value,
+        flags=re.IGNORECASE,
+    ):
+        claims.add(f"{match.group(1)}%")
+    for match in re.finditer(r"\b(?:spf|fps)\s*(\d{1,3})\b", value, flags=re.IGNORECASE):
+        claims.add(f"spf{match.group(1)}")
+    return claims
+
+
+def _verified_claim_text(metadata: Mapping[str, Any]) -> str:
+    values = metadata.get("verified_claims", ())
+    if isinstance(values, str):
+        return values
+    if isinstance(values, Mapping):
+        values = (*values.keys(), *values.values())
+    if isinstance(values, (list, tuple, set, frozenset)):
+        return " ".join(str(value) for value in values)
+    return ""
 
 
 def validate_marketing_copy(
@@ -166,6 +260,30 @@ def validate_marketing_copy(
         + normalized["hashtags"]
     )
     normalized_ocr = normalize_ocr_text(ocr_text).casefold()
+    ocr_tokens = set(re.findall(r"[a-z]+", normalized_ocr))
+    requested_language = str(metadata.get("language", "")).strip().casefold().replace("_", "-").split("-", 1)[0]
+    if requested_language == "fr" and _contains_clearly_english_creative(
+        [normalized["titre"], normalized["sous_titre"], *normalized["bullets"], normalized["cta"]],
+        ignored_tokens=ocr_tokens,
+    ):
+        raise CopyContractError("requested French copy contains clearly English creative language")
+
+    verified_text = " ".join(
+        value
+        for value in (
+            _verified_claim_text(metadata),
+            _verified_claim_text(normalized["_meta"]),
+            str(metadata.get("brand", "")),
+            str(metadata.get("product_name", "")),
+        )
+        if value
+    )
+    evidence_claims = _numeric_claims(normalized_ocr) | _numeric_claims(verified_text)
+    unsupported_numeric = _numeric_claims(all_copy) - evidence_claims
+    if unsupported_numeric:
+        claims = ", ".join(sorted(unsupported_numeric))
+        raise CopyContractError(f"unsupported numeric claim without OCR or verified evidence: {claims}")
+
     for term in CLAIM_TERMS:
         if term in all_copy.casefold() and term not in normalized_ocr:
             raise CopyContractError(f"unsupported claim: {term}")
@@ -201,10 +319,36 @@ def build_inpaint_prompt(category: str) -> str:
 
 
 def _load_font(size: int, style: str = "regular") -> ImageFont.ImageFont:
-    for candidate in _FONT_CANDIDATES.get(style, _FONT_CANDIDATES["regular"]):
-        if Path(candidate).exists():
-            return ImageFont.truetype(candidate, size=size)
-    return ImageFont.load_default()
+    candidates = tuple(_FONT_CANDIDATES.get(style, _FONT_CANDIDATES["regular"]))
+    for candidate in candidates:
+        path = Path(candidate)
+        if not path.is_file():
+            continue
+        try:
+            font = ImageFont.truetype(str(path), size=size)
+            if hasattr(font, "set_variation_by_name"):
+                try:
+                    names = set(font.get_variation_names())
+                    preferred = {
+                        "regular": b"Regular",
+                        "serif": b"Regular",
+                        "bold": b"SemiBold",
+                    }.get(style)
+                    if preferred in names:
+                        font.set_variation_by_name(preferred)
+                except (AttributeError, OSError):
+                    # Weight axes are a visual enhancement; loading the
+                    # bundled FreeType face remains the hard requirement.
+                    pass
+            return font
+        except OSError:
+            # A corrupt candidate should not make us silently use a system
+            # fallback; try the next bundled file and fail explicitly below.
+            continue
+    attempted = ", ".join(candidates) or "(none)"
+    raise FileNotFoundError(
+        f"Bundled {style} font is missing or unreadable; tried: {attempted}"
+    )
 
 
 def _fit_font(draw: ImageDraw.ImageDraw, text: str, max_width: int, start_size: int, style: str) -> ImageFont.ImageFont:
@@ -261,10 +405,80 @@ def _fit_product(product: Image.Image, max_width: int, max_height: int) -> Image
 
 def _add_contact_shadow(canvas: Image.Image, product: Image.Image, position: tuple[int, int]) -> None:
     alpha = product.getchannel("A")
-    shadow = Image.new("RGBA", product.size, (0, 0, 0, 0))
-    shadow.putalpha(alpha.filter(ImageFilter.GaussianBlur(18)))
-    shadow = Image.eval(shadow, lambda value: int(value * 0.28))
-    canvas.alpha_composite(shadow, (position[0] + 14, position[1] + 18))
+    bbox = alpha.getbbox()
+    if bbox is None:
+        return
+
+    # A contact shadow belongs to the surface footprint, not to the whole
+    # bottle silhouette.  Build a small, flattened ellipse at the lower edge
+    # of the alpha bounds so shoulder/neck cut-outs cannot cast a floating
+    # shadow above the product.
+    left, _top, right, bottom = bbox
+    footprint_width = max(8, int((right - left) * 0.72))
+    footprint_height = max(6, int(product.height * 0.12))
+    center_x = (left + right) // 2
+    shadow_extra = footprint_height * 2 + 8
+    shadow_mask = Image.new("L", (product.width, product.height + shadow_extra), 0)
+    mask_draw = ImageDraw.Draw(shadow_mask)
+    center_y = bottom + footprint_height // 2 + 4
+    mask_draw.ellipse(
+        (
+            center_x - footprint_width // 2,
+            center_y - footprint_height // 2,
+            center_x + footprint_width // 2,
+            center_y + footprint_height // 2,
+        ),
+        fill=82,
+    )
+    shadow_mask = shadow_mask.filter(ImageFilter.GaussianBlur(max(3, footprint_height // 3)))
+    shadow = Image.new("RGBA", shadow_mask.size, (18, 29, 48, 0))
+    shadow.putalpha(shadow_mask)
+    canvas.alpha_composite(shadow, position)
+
+
+def _add_surface_reflection(canvas: Image.Image, product: Image.Image, position: tuple[int, int]) -> None:
+    """Add a restrained, vertically compressed reflection below the footprint."""
+
+    alpha = product.getchannel("A")
+    bbox = alpha.getbbox()
+    if bbox is None:
+        return
+    left, _top, right, bottom = bbox
+    reflection_height = max(1, min(int(product.height * 0.10), product.height))
+    source_height = max(1, min(bottom - max(0, bottom - reflection_height * 3), product.height))
+    source = product.crop((left, bottom - source_height, right, bottom))
+    reflection = source.transpose(Image.Transpose.FLIP_TOP_BOTTOM).resize(
+        (max(1, right - left), reflection_height),
+        Image.Resampling.LANCZOS,
+    )
+    reflection_alpha = reflection.getchannel("A").point(lambda value: int(value * 0.10))
+    reflection.putalpha(reflection_alpha)
+    canvas.alpha_composite(reflection, (position[0] + left, position[1] + bottom))
+
+
+def _fit_inside_safe_margins(
+    product: Image.Image,
+    position: tuple[int, int],
+    canvas_size: tuple[int, int],
+    margin_ratio: float = 0.05,
+) -> tuple[Image.Image, tuple[int, int]]:
+    """Scale and clamp a product so every opaque pixel clears the safe margin."""
+
+    width, height = canvas_size
+    margin_x = max(1, math.ceil(width * margin_ratio))
+    margin_y = max(1, math.ceil(height * margin_ratio))
+    max_width = max(1, width - margin_x * 2)
+    max_height = max(1, height - margin_y * 2)
+    if product.width > max_width or product.height > max_height:
+        scale = min(max_width / product.width, max_height / product.height)
+        product = product.resize(
+            (max(1, round(product.width * scale)), max(1, round(product.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+
+    x = min(max(position[0], margin_x), width - margin_x - product.width)
+    y = min(max(position[1], margin_y), height - margin_y - product.height)
+    return product, (x, y)
 
 
 def render_poster(
@@ -283,17 +497,27 @@ def render_poster(
 
     is_landscape = platform in {"facebook", "linkedin"}
     if is_landscape:
-        panel_width = int(width * 0.47)
-        product_box = (int(width * 0.38), int(height * 0.78))
-        product_anchor = (int(width * 0.76), int(height * 0.56))
+        panel_width = int(width * 0.42)
+        product_box = (int(width * 0.36), int(height * 0.74))
+        product_anchor = (int(width * 0.78), int(height * 0.55))
         padding = int(width * 0.055)
+        brand_size, title_size, body_size = 28, 64, 24
     else:
-        panel_width = int(width * 0.49)
-        product_box = (int(width * 0.42), int(height * 0.78))
-        product_anchor = (int(width * 0.77), int(height * 0.53))
-        padding = int(width * 0.065)
+        panel_width = int(width * 0.44)
+        product_box = (int(width * 0.38), int(height * 0.74))
+        product_anchor = (int(width * 0.77), int(height * 0.54))
+        padding = int(width * 0.06)
+        brand_size, title_size, body_size = 31, 72, 27
 
-    panel = Image.new("RGBA", (panel_width, height), (248, 248, 244, 238))
+    # A feathered editorial veil keeps type readable while preserving the
+    # generated photography—there is no hard split-panel boundary.
+    veil_width = min(width, round(width * 0.58))
+    panel = Image.new("RGBA", (veil_width, height), (248, 248, 244, 0))
+    alpha_ramp = Image.new("L", (veil_width, 1))
+    for x in range(veil_width):
+        progress = x / max(1, veil_width - 1)
+        alpha_ramp.putpixel((x, 0), round(112 * ((1 - progress) ** 1.8)))
+    panel.putalpha(alpha_ramp.resize((veil_width, height)))
     canvas.alpha_composite(panel, (0, 0))
     draw = ImageDraw.Draw(canvas)
     max_text_width = panel_width - (padding * 2)
@@ -317,32 +541,39 @@ def render_poster(
         crop_y = max(0, round((source_height * scale - height) / 2))
         product_x = round(source_product_position[0] * scale - crop_x)
         product_y = round(source_product_position[1] * scale - crop_y)
-    _add_contact_shadow(canvas, resized_product, (product_x, product_y))
-    canvas.alpha_composite(resized_product, (product_x, product_y))
+    resized_product, (product_x, product_y) = _fit_inside_safe_margins(
+        resized_product,
+        (product_x, product_y),
+        (width, height),
+    )
 
     y = padding
-    eyebrow = _fit_font(draw, copy["brand"].upper(), max_text_width, 38 if is_landscape else 44, "bold")
-    draw.text((padding, y), copy["brand"].upper(), font=eyebrow, fill="#17315E")
-    y += draw.textbbox((padding, y), copy["brand"].upper(), font=eyebrow)[3] + (28 if is_landscape else 36)
+    identity = f"{copy['brand'].upper()} / {copy['product_name']}"
+    identity_font = _fit_font(draw, identity, max_text_width, brand_size, "bold")
+    draw.text((padding, y), identity, font=identity_font, fill="#17315E")
+    y += draw.textbbox((padding, y), identity, font=identity_font)[3] + (20 if is_landscape else 24)
 
-    title_font = _fit_font(draw, copy["titre"], max_text_width, 70 if is_landscape else 76, "serif")
-    y = _draw_wrapped(draw, copy["titre"], (padding, y), title_font, "#172B4D", max_text_width, 8)
-    y += 14
+    title_style = (
+        "serif"
+        if normalize_category(str(copy.get("category", ""))) in {"perfume", "makeup"}
+        else "bold"
+    )
+    title_font = _fit_font(draw, copy["titre"], max_text_width, title_size, title_style)
+    y = _draw_wrapped(draw, copy["titre"], (padding, y), title_font, "#172B4D", max_text_width, 6)
+    y += 10
 
-    subtitle_font = _fit_font(draw, copy["sous_titre"], max_text_width, 32 if is_landscape else 34, "regular")
-    y = _draw_wrapped(draw, copy["sous_titre"], (padding, y), subtitle_font, "#334E68", max_text_width, 8)
-    y += 18
+    body_font = _fit_font(draw, copy["sous_titre"], max_text_width, body_size, "regular")
+    y = _draw_wrapped(draw, copy["sous_titre"], (padding, y), body_font, "#334E68", max_text_width, 7)
+    y += 12
 
-    bullet_font = _load_font(22 if is_landscape else 25, "regular")
     for bullet in copy.get("bullets", [])[:3]:
-        bullet_lines = _wrap_lines(draw, bullet, bullet_font, max_text_width - 28)
-        draw.ellipse((padding, y + 8, padding + 9, y + 17), fill="#25A9B8")
-        y = _draw_wrapped(draw, " ".join(bullet_lines), (padding + 22, y), bullet_font, "#334E68", max_text_width - 22, 5)
-        y += 5
+        draw.ellipse((padding, y + 7, padding + 8, y + 15), fill="#25A9B8")
+        y = _draw_wrapped(draw, bullet, (padding + 19, y), body_font, "#334E68", max_text_width - 19, 4)
+        y += 4
 
-    cta_width = min(max_text_width, 260 if is_landscape else 300)
-    cta_height = 54 if is_landscape else 60
-    cta_y = y + 16
+    cta_width = min(max_text_width, 208 if is_landscape else 224)
+    cta_height = 44 if is_landscape else 48
+    cta_y = y + 14
     if cta_y + cta_height > height - padding:
         raise ValueError(f"copy does not fit the {platform} safe area")
     cta_text = copy["cta"].upper()
@@ -350,12 +581,12 @@ def render_poster(
         draw,
         cta_text,
         max(1, cta_width - 32),
-        22 if is_landscape else 24,
+        19 if is_landscape else 21,
         "bold",
     )
     draw.rounded_rectangle(
         (padding, cta_y, padding + cta_width, cta_y + cta_height),
-        radius=16,
+        radius=14,
         fill="#17315E",
     )
     draw.text(
@@ -365,6 +596,13 @@ def render_poster(
         fill="white",
         anchor="mm",
     )
+
+    # Keep the untouched cutout as the final composited layer.  The shadow is
+    # intentionally added first so neither copy nor panel paint can overwrite
+    # opaque package pixels.
+    _add_surface_reflection(canvas, resized_product, (product_x, product_y))
+    _add_contact_shadow(canvas, resized_product, (product_x, product_y))
+    canvas.alpha_composite(resized_product, (product_x, product_y))
 
     return canvas.convert("RGB")
 

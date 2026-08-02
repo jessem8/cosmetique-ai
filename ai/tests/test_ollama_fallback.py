@@ -66,7 +66,7 @@ def test_copy_tries_configured_fallback_models(monkeypatch: pytest.MonkeyPatch) 
     assert calls == ["primary", "primary", "fallback-qwen"]
 
 
-def test_copy_error_reports_models_attempted(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_copy_exhaustion_returns_grounded_french_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeClient:
         def __init__(self, host: str) -> None:
             pass
@@ -78,8 +78,43 @@ def test_copy_error_reports_models_attempted(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(pipeline, "OLLAMA_MODEL", "primary")
     monkeypatch.setattr(pipeline, "OLLAMA_FALLBACK_MODELS", ("fallback-qwen",))
 
-    with pytest.raises(pipeline.PipelineError, match="primary.*fallback-qwen"):
-        pipeline.generate_marketing_copy(
-            {"text": "Rexona Shower Fresh"},
-            {"brand": "Rexona", "product_name": "Shower Fresh", "category": "deodorant"},
-        )
+    result = pipeline.generate_marketing_copy(
+        {"text": "Rexona Shower FresH OCR TYP0"},
+        {"brand": "Rexona", "product_name": "Shower Fresh", "category": "deodorant"},
+        language="fr",
+    )
+
+    assert result["_meta"]["fallback"] is True
+    assert result["cta"] == "Découvrir"
+    assert "Fraîcheur" in result["titre"]
+    creative = " ".join(
+        [result["titre"], result["sous_titre"], result["cta"], *result["bullets"]]
+    ).casefold()
+    assert "ocr" not in creative
+    assert "typ0" not in creative
+    assert any("primary" in error for error in result["_meta"]["model_errors"])
+    assert any("fallback-qwen" in error for error in result["_meta"]["model_errors"])
+
+
+def test_malformed_model_output_returns_grounded_french_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeClient:
+        def __init__(self, host: str) -> None:
+            pass
+
+        def chat(self, *, model: str, **_: object) -> object:
+            return types.SimpleNamespace(message=types.SimpleNamespace(content="not valid JSON"))
+
+    monkeypatch.setitem(sys.modules, "ollama", types.SimpleNamespace(Client=FakeClient))
+    monkeypatch.setattr(pipeline, "OLLAMA_MODEL", "primary")
+    monkeypatch.setattr(pipeline, "OLLAMA_FALLBACK_MODELS", ())
+
+    result = pipeline.generate_marketing_copy(
+        {"text": "Rexona Shower Fresh OCR TYP0"},
+        {"brand": "Rexona", "product_name": "Shower Fresh", "category": "deodorant"},
+        language="fr",
+    )
+
+    assert result["_meta"]["fallback"] is True
+    assert result["cta"] == "Découvrir"
+    assert "ocr" not in result["titre"].casefold()
+    assert "typ0" not in result["sous_titre"].casefold()

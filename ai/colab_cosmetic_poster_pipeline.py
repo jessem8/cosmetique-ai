@@ -16,9 +16,11 @@ from __future__ import annotations
 import hmac
 import io
 import json
+import math
 import os
 import re
-from functools import lru_cache
+import time
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -74,18 +76,23 @@ OLLAMA_FALLBACK_MODELS = tuple(
     ).split(",")
     if model.strip()
 )
-PIPELINE_VERSION = "1.1.5"
+PIPELINE_VERSION = "1.2.0"
 RUNTIME_ID = os.getenv("COLAB_RUNTIME_ID", f"colab-runtime-{os.getpid()}")
 
 CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "sunscreen": ("spf", "sunscreen", "sun screen", "solaire", "anthelios", "uvmune", "daylong"),
     "deodorant": ("deodor", "motion sense", "motionsense", "anti-transpir", "shower fresh"),
     "perfume": ("parfum", "perfume", "eau de parfum", "eau de toilette", "idôle", "idole", "nectar"),
     "makeup": ("palette", "mascara", "lipstick", "gloss", "blush", "highlighter", "eyeshadow"),
-    "skincare": ("serum", "creme", "crème", "gel moussant", "seb iaclear", "hydra", "spf"),
-    "haircare": ("shampoo", "shampooing", "conditioner", "huile capillaire", "hair"),
-    "sunscreen": ("spf", "sunscreen", "solaire", "anthelios", "uvmune"),
+    "haircare": ("shampoo", "shampooing", "conditioner", "huile capillaire", "hair oil", "hair"),
+    "bodycare": (
+        "lait corporel", "body wash", "body butter", "baume corporel", "handcreme",
+        "hand cream", "crème mains", "creme mains", "shower gel", "gel douche",
+        "body mist", "brume corps", "lip balm", "baume lèvres", "baume levres",
+        "wipes", "lingettes", "wax", "cire",
+    ),
+    "skincare": ("serum", "creme", "crème", "gel moussant", "seb iaclear", "hydra"),
     "nailcare": ("dissolvant", "ongles", "nail"),
-    "bodycare": ("lait corporel", "body wash", "body butter", "baume corporel", "handcreme"),
 }
 
 _COPY_SCHEMA = {
@@ -98,7 +105,7 @@ _COPY_SCHEMA = {
         "titre": {"type": "string", "minLength": 1},
         "sous_titre": {"type": "string", "minLength": 1},
         "bullets": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 3},
-        "cta": {"type": "string", "minLength": 1, "enum": ["Découvrir", "Adopter", "Essayer", "En savoir plus"]},
+        "cta": {"type": "string", "minLength": 1},
         "hashtags": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 5},
         "_meta": {
             "type": "object",
@@ -125,6 +132,42 @@ _COPY_SCHEMA = {
 
 class PipelineError(RuntimeError):
     """Raised when a required pipeline stage cannot produce a trustworthy result."""
+
+
+def normalize_target_box(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Validate the backend-compatible normalized product box contract."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or value.get("type") != "box":
+        raise ValueError("target_box must be an object with type='box'")
+    result: dict[str, Any] = {"type": "box"}
+    for key in ("x", "y", "width", "height"):
+        try:
+            number = float(value[key])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"target_box.{key} must be a finite number") from exc
+        if not math.isfinite(number):
+            raise ValueError(f"target_box.{key} must be finite")
+        result[key] = number
+    if result["x"] < 0 or result["y"] < 0:
+        raise ValueError("target_box origin must be inside the image")
+    if result["width"] <= 0 or result["height"] <= 0:
+        raise ValueError("target_box width and height must be positive")
+    if result["x"] + result["width"] > 1 or result["y"] + result["height"] > 1:
+        raise ValueError("target_box must remain inside normalized image bounds")
+    return result
+
+
+def _crop_target(image: Image.Image, target_box: Mapping[str, Any], padding: float = 0.04) -> Image.Image:
+    x = float(target_box["x"])
+    y = float(target_box["y"])
+    width = float(target_box["width"])
+    height = float(target_box["height"])
+    left = max(0, round((x - padding) * image.width))
+    top = max(0, round((y - padding) * image.height))
+    right = min(image.width, round((x + width + padding) * image.width))
+    bottom = min(image.height, round((y + height + padding) * image.height))
+    return image.crop((left, top, right, bottom))
 
 
 def preprocess_image(image_bytes: bytes, max_side: int = 1536) -> Image.Image:
@@ -198,7 +241,10 @@ def _parse_ocr_result(result: Any) -> list[dict[str, Any]]:
     return items
 
 
-def read_product_label(image: Image.Image) -> dict[str, Any]:
+def read_product_label(
+    image: Image.Image,
+    roi_images: list[Image.Image] | tuple[Image.Image, ...] = (),
+) -> dict[str, Any]:
     # PaddleOCR 3.x enables oneDNN by default on CPU. Colab's preloaded
     # PaddlePaddle build can fail in that path, so keep OCR on the stable CPU
     # kernel while SDXL uses the CUDA runtime separately.
@@ -221,30 +267,48 @@ def read_product_label(image: Image.Image) -> dict[str, Any]:
     # French is a Latin-language model and covers the English/French labels in the dataset.
     engine = PaddleOCR(
         lang="fr",
-        use_doc_orientation_classify=False,
+        use_doc_orientation_classify=True,
         use_doc_unwarping=False,
-        use_textline_orientation=False,
+        use_textline_orientation=True,
+        text_rec_score_thresh=0.25,
         enable_mkldnn=False,
     )
-    enlarged = image.resize((image.width * 2, image.height * 2), Image.Resampling.LANCZOS)
-    array = np.asarray(enlarged)
-
-    if hasattr(engine, "predict"):
-        result = engine.predict(array)
-    elif hasattr(engine, "ocr"):
-        result = engine.ocr(array, cls=True)
-    else:
-        raise PipelineError("Unsupported PaddleOCR API: no predict or ocr method available")
-
     items: list[dict[str, Any]] = []
-    for item in result if isinstance(result, list) else [result]:
-        items.extend(_parse_ocr_result(item))
+    inputs = [image, *roi_images]
+    for source_index, source in enumerate(inputs):
+        scale = max(1.0, min(3.0, 1280 / max(source.width, source.height)))
+        enlarged = source.resize(
+            (max(1, round(source.width * scale)), max(1, round(source.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+        array = np.asarray(enlarged)
+        if hasattr(engine, "predict"):
+            result = engine.predict(array)
+        elif hasattr(engine, "ocr"):
+            result = engine.ocr(array, cls=True)
+        else:
+            raise PipelineError("Unsupported PaddleOCR API: no predict or ocr method available")
+        for item in result if isinstance(result, list) else [result]:
+            parsed = _parse_ocr_result(item)
+            for candidate in parsed:
+                candidate["source"] = "full" if source_index == 0 else f"roi_{source_index}"
+            items.extend(parsed)
+
+    # Keep the strongest reading for duplicates across the full frame and ROI passes.
+    merged: dict[str, dict[str, Any]] = {}
+    for item in items:
+        key = re.sub(r"\W+", "", item["text"].casefold())
+        if key and (key not in merged or item["confidence"] > merged[key]["confidence"]):
+            merged[key] = item
+    # Preserve first-pass reading order for brand/product inference while
+    # replacing duplicate readings with the highest-confidence evidence.
+    items = list(merged.values())
 
     if not items:
         raise PipelineError("PaddleOCR found no readable product label text")
 
     text = normalize_ocr_text(" ".join(item["text"] for item in items))
-    return {"text": text, "items": items}
+    return {"text": text, "items": items, "passes": len(inputs)}
 
 
 def infer_category_from_text(text: str) -> str:
@@ -317,6 +381,55 @@ def remove_product_background(image: Image.Image) -> tuple[Image.Image, Image.Im
     return cutout, mask
 
 
+def evaluate_mask_quality(mask: Image.Image, *, target_source: str) -> dict[str, Any]:
+    """Reject masks that cannot safely preserve a single complete product."""
+    alpha = mask.convert("L")
+    bbox = alpha.getbbox()
+    if bbox is None:
+        raise PipelineError("Product isolation returned an empty mask; provide target_hint")
+    left, top, right, bottom = bbox
+    histogram = alpha.histogram()
+    foreground = sum(histogram[16:])
+    area_ratio = foreground / max(1, alpha.width * alpha.height)
+    bbox_ratio = ((right - left) * (bottom - top)) / max(1, alpha.width * alpha.height)
+    edges = {
+        "left": left <= 1,
+        "top": top <= 1,
+        "right": right >= alpha.width - 1,
+        "bottom": bottom >= alpha.height - 1,
+    }
+    metrics = {
+        "area_ratio": round(area_ratio, 4),
+        "bbox_ratio": round(bbox_ratio, 4),
+        "bbox": [left, top, right, bottom],
+        "edge_contacts": [name for name, touched in edges.items() if touched],
+        "target_source": target_source,
+    }
+    too_small = area_ratio < 0.012 or (right - left) < 24 or (bottom - top) < 24
+    too_large = area_ratio > 0.88
+    opposing_edges = (edges["left"] and edges["right"]) or (edges["top"] and edges["bottom"])
+    if too_small or too_large or opposing_edges:
+        raise PipelineError(
+            "Product isolation looks incomplete or suspicious; provide a normalized target_hint box"
+        )
+    return metrics
+
+
+def _mask_roi(image: Image.Image, mask: Image.Image, padding: float = 0.08) -> Image.Image:
+    bbox = mask.getbbox()
+    if bbox is None:
+        return image
+    left, top, right, bottom = bbox
+    pad_x = round((right - left) * padding)
+    pad_y = round((bottom - top) * padding)
+    return image.crop((
+        max(0, left - pad_x),
+        max(0, top - pad_y),
+        min(image.width, right + pad_x),
+        min(image.height, bottom + pad_y),
+    ))
+
+
 def prepare_inpainting_inputs(
     cutout: Image.Image,
     canvas_size: tuple[int, int] = (1024, 1024),
@@ -328,8 +441,9 @@ def prepare_inpainting_inputs(
         raise PipelineError("Cannot prepare inpainting inputs from an empty alpha mask")
 
     trimmed = cutout.crop(bbox)
-    max_width = int(canvas_size[0] * 0.43)
-    max_height = int(canvas_size[1] * 0.78)
+    is_wide = canvas_size[0] / canvas_size[1] > 1.4
+    max_width = int(canvas_size[0] * (0.34 if is_wide else 0.40))
+    max_height = int(canvas_size[1] * (0.86 if is_wide else 0.82))
     scale = min(max_width / trimmed.width, max_height / trimmed.height)
     product = trimmed.resize(
         (max(1, int(trimmed.width * scale)), max(1, int(trimmed.height * scale))),
@@ -337,8 +451,14 @@ def prepare_inpainting_inputs(
     )
 
     position = (
-        int(canvas_size[0] * 0.72 - product.width / 2),
-        int(canvas_size[1] * 0.54 - product.height / 2),
+        int(canvas_size[0] * (0.76 if is_wide else 0.74) - product.width / 2),
+        int(canvas_size[1] * 0.52 - product.height / 2),
+    )
+    safe_x = round(canvas_size[0] * 0.05)
+    safe_y = round(canvas_size[1] * 0.05)
+    position = (
+        min(max(safe_x, position[0]), canvas_size[0] - safe_x - product.width),
+        min(max(safe_y, position[1]), canvas_size[1] - safe_y - product.height),
     )
     base = canvas.convert("RGBA")
     base.alpha_composite(product, position)
@@ -409,6 +529,8 @@ def generate_environment(
         guidance_scale=7.0,
         num_inference_steps=30,
         generator=generator,
+        width=base.width,
+        height=base.height,
     ).images[0]
     return result.convert("RGB")
 
@@ -426,6 +548,7 @@ def generate_marketing_copy(
     ocr: Mapping[str, Any],
     metadata: Mapping[str, str],
     tone: str = "premium",
+    language: str = "fr",
 ) -> dict[str, Any]:
     try:
         from ollama import Client
@@ -435,14 +558,22 @@ def generate_marketing_copy(
         ) from exc
 
     ocr_text = normalize_ocr_text(str(ocr.get("text", "")))
+    language = (language or "fr").strip().lower()
+    language_instruction = (
+        "Écris tous les textes créatifs exclusivement en français correct, avec les accents."
+        if language.startswith("fr")
+        else f"Write every creative field in language code {language}."
+    )
     user_prompt = f"""
 Produit: {metadata["brand"]} {metadata["product_name"]}
 Catégorie: {metadata["category"]}
 Ton: {tone}
+Langue demandée: {language}
 Texte réellement lu sur l'étiquette:
 {ocr_text}
 
 Retourne uniquement l'objet JSON demandé.
+{language_instruction}
 Le champ titre doit être une ligne créative courte.
 Le sous_titre et les bullets ne peuvent utiliser que des informations compatibles avec le texte OCR.
 N'invente aucune promesse médicale, clinique, dermatologique, aucun résultat chiffré absent de l'étiquette et aucun ingrédient absent.
@@ -480,7 +611,9 @@ La valeur _meta.source doit être exactement la chaîne "ocr+metadata".
                 )
                 raw = _ollama_content(response)
                 payload = json.loads(raw)
-                return validate_marketing_copy(payload, ocr_text, metadata)
+                validation_metadata = dict(metadata)
+                validation_metadata["language"] = language
+                return validate_marketing_copy(payload, ocr_text, validation_metadata)
             except Exception as exc:
                 errors.append(f"{model} attempt {attempt + 1}: {exc}")
                 model_prompt += (
@@ -489,12 +622,63 @@ La valeur _meta.source doit être exactement la chaîne "ocr+metadata".
                     "Pour cta, utilise exactement 'Découvrir' si nécessaire."
                 )
 
-    tried = ", ".join(configured_models) or "(none)"
-    detail = " | ".join(errors[-4:]) or "no response"
-    raise PipelineError(
-        f"Qwen/Ollama did not produce valid copy. Tried models: {tried}. "
-        f"Last errors: {detail}"
-    )
+    # A malformed or wrong-language model response must never leak into public copy.
+    # This fallback uses only caller-verified identity/category fields and makes no claim.
+    fallback = _safe_marketing_copy(metadata, ocr_text, language)
+    fallback["_meta"]["model_errors"] = errors[-4:]
+    return fallback
+
+
+def _safe_marketing_copy(
+    metadata: Mapping[str, str],
+    ocr_text: str,
+    language: str,
+) -> dict[str, Any]:
+    category = normalize_category(metadata.get("category"))
+    if language.startswith("fr"):
+        titles = {
+            "deodorant": "Fraîcheur en mouvement",
+            "perfume": "Un sillage singulier",
+            "makeup": "Votre geste beauté",
+            "skincare": "Le soin essentiel",
+            "haircare": "L'éclat au quotidien",
+            "sunscreen": "Votre rituel solaire",
+            "nailcare": "Le geste précis",
+            "bodycare": "Un moment pour soi",
+            "cosmetics": "Une beauté singulière",
+        }
+        subtitles = {
+            "deodorant": "Un geste frais pour accompagner votre quotidien.",
+            "perfume": "Une signature olfactive à découvrir.",
+            "makeup": "Une touche expressive, simplement.",
+            "skincare": "Un geste simple au cœur de votre rituel.",
+            "haircare": "Un rituel pensé pour vos cheveux.",
+            "sunscreen": "Un essentiel pour vos moments au soleil.",
+            "nailcare": "Une touche soignée jusque dans les détails.",
+            "bodycare": "Un geste agréable dans votre rituel.",
+            "cosmetics": "Une présence élégante dans votre quotidien.",
+        }
+        subtitle = subtitles.get(category, subtitles["cosmetics"])
+        cta = "Découvrir"
+    else:
+        titles = {key: "An everyday essential" for key in CATEGORY_KEYWORDS}
+        titles["cosmetics"] = "An everyday essential"
+        subtitle = "A refined addition to your daily ritual."
+        cta = "Discover"
+    payload = {
+        "brand": str(metadata["brand"]).strip(),
+        "product_name": str(metadata["product_name"]).strip(),
+        "category": category,
+        "titre": titles.get(category, titles["cosmetics"]),
+        "sous_titre": subtitle,
+        "bullets": [],
+        "cta": cta,
+        "hashtags": [],
+        "_meta": {"ocr_text": normalize_ocr_text(ocr_text), "source": "ocr+metadata", "fallback": True},
+    }
+    validation_metadata = dict(metadata)
+    validation_metadata["language"] = language
+    return validate_marketing_copy(payload, ocr_text, validation_metadata)
 
 
 def _image_from_bytes(value: bytes) -> Image.Image:
@@ -506,40 +690,103 @@ def generate_campaign_zip(
     *,
     source_name: str = "uploaded_product",
     metadata_overrides: Mapping[str, str] | None = None,
+    language: str = "fr",
+    target_box: Mapping[str, Any] | None = None,
     seed: int = 42,
     request_context: Mapping[str, Any] | None = None,
 ) -> bytes:
+    started = time.perf_counter()
+    timings: dict[str, float] = {}
+    stage = time.perf_counter()
     image = preprocess_image(image_bytes)
-    ocr = read_product_label(image)
+    timings["preprocess_seconds"] = round(time.perf_counter() - stage, 3)
+    normalized_target = normalize_target_box(target_box)
+    target_source = "manual" if normalized_target else "automatic"
+    isolation_input = _crop_target(image, normalized_target) if normalized_target else image
+
+    stage = time.perf_counter()
+    cutout, product_mask = remove_product_background(isolation_input)
+    mask_metrics = evaluate_mask_quality(product_mask, target_source=target_source)
+    timings["isolation_seconds"] = round(time.perf_counter() - stage, 3)
+
+    stage = time.perf_counter()
+    roi = _mask_roi(isolation_input, product_mask)
+    roi_inputs = [roi]
+    if normalized_target:
+        roi_inputs.insert(0, isolation_input)
+    ocr = read_product_label(image, roi_inputs=roi_inputs)
+    timings["ocr_seconds"] = round(time.perf_counter() - stage, 3)
     metadata = infer_product_metadata(ocr, metadata_overrides)
-    # Validate the text subsystem before loading rembg/SDXL. A dead Ollama
-    # service now fails in seconds instead of after a full image generation.
-    copy = generate_marketing_copy(ocr, metadata, metadata["tone"])
-    cutout, product_mask = remove_product_background(image)
-    base, inpaint_mask, product, product_position = prepare_inpainting_inputs(cutout)
-    scene = generate_environment(base, inpaint_mask, metadata["category"], seed=seed)
+    stage = time.perf_counter()
+    copy = generate_marketing_copy(ocr, metadata, metadata["tone"], language=language)
+    timings["copy_seconds"] = round(time.perf_counter() - stage, 3)
+
+    stage = time.perf_counter()
+    square_base, square_mask, square_product, square_position = prepare_inpainting_inputs(
+        cutout, (1024, 1024)
+    )
+    square_scene = generate_environment(
+        square_base, square_mask, metadata["category"], seed=seed
+    )
+    timings["square_scene_seconds"] = round(time.perf_counter() - stage, 3)
+
+    stage = time.perf_counter()
+    wide_base, wide_mask, wide_product, wide_position = prepare_inpainting_inputs(
+        cutout, (1216, 640)
+    )
+    wide_scene = generate_environment(
+        wide_base, wide_mask, metadata["category"], seed=seed + 1
+    )
+    timings["wide_scene_seconds"] = round(time.perf_counter() - stage, 3)
 
     # The renderer receives the original rembg pixels, never the SDXL package.
     posters = {
-        platform: render_poster(
-            scene,
-            product,
+        "instagram": render_poster(
+            square_scene,
+            square_product,
             copy,
-            platform,
-            source_product_position=product_position,
-        )
-        for platform in FORMATS
+            "instagram",
+            source_product_position=square_position,
+        ),
+        "facebook": render_poster(
+            wide_scene,
+            wide_product,
+            copy,
+            "facebook",
+            source_product_position=wide_position,
+        ),
+        "linkedin": render_poster(
+            wide_scene,
+            wide_product,
+            copy,
+            "linkedin",
+            source_product_position=wide_position,
+        ),
     }
     context = dict(request_context or {})
+    timings["total_seconds"] = round(time.perf_counter() - started, 3)
     manifest = {
         "pipeline_version": PIPELINE_VERSION,
         "runtime_id": RUNTIME_ID,
         "generation_id": str(context.get("generation_id", "")),
         "request_id": str(context.get("request_id", "")),
         "input_snapshot_hash": str(context.get("input_snapshot_hash", "")),
-        "language": str(context.get("language", "fr")),
+        "language": language,
+        "copy_language": language,
         "source_name": source_name,
         "category": metadata["category"],
+        "scenes": {
+            "square": {"dimensions": [1024, 1024], "seed": seed},
+            "wide": {"dimensions": [1216, 640], "seed": seed + 1},
+        },
+        "target_box_source": target_source,
+        "target_box": normalized_target,
+        "mask_quality": mask_metrics,
+        "fonts": {
+            "sans": "Manrope Variable",
+            "serif": "Cormorant Garamond Variable",
+        },
+        "timings": timings,
         "models": {
             "background_removal": "isnet-general-use",
             "ocr": "PaddleOCR-lang-fr",
@@ -550,13 +797,24 @@ def generate_campaign_zip(
         "seed": seed,
         "preserves_product_pixels": True,
         "text_rendering": "Pillow",
+        "package_versions": _package_versions(),
     }
     diagnostics = {
         "cutout.png": cutout,
         "mask.png": product_mask,
-        "background.jpg": scene,
+        "background.jpg": square_scene,
     }
     return build_campaign_zip(posters, copy, ocr, manifest, diagnostics=diagnostics)
+
+
+def _package_versions() -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for package in ("Pillow", "paddleocr", "paddlepaddle", "rembg", "diffusers", "torch", "ollama"):
+        try:
+            versions[package] = importlib_metadata.version(package)
+        except importlib_metadata.PackageNotFoundError:
+            versions[package] = "not-installed"
+    return versions
 
 
 def generate_text_only(
@@ -565,6 +823,7 @@ def generate_text_only(
     product_name: str,
     category: str,
     tone: str = "premium",
+    language: str = "fr",
     metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     ocr = {"text": normalize_ocr_text(ocr_text), "items": []}
@@ -581,7 +840,7 @@ def generate_text_only(
             "tone": tone,
         }
     )
-    return generate_marketing_copy(ocr, supplied, tone)
+    return generate_marketing_copy(ocr, supplied, tone, language=language)
 
 
 def runtime_ready() -> bool:
@@ -665,12 +924,19 @@ def create_app() -> Any:
         request_id: str = Form(default=""),
         input_snapshot_hash: str = Form(default=""),
         language: str = Form(default="fr"),
+        target_hint: str = Form(default=""),
     ) -> Response:
         image_bytes = await image.read()
         if not image_bytes:
             from fastapi import HTTPException
             raise HTTPException(status_code=400, detail="Empty image upload")
         try:
+            parsed_target = None
+            if target_hint.strip():
+                parsed = json.loads(target_hint)
+                if not isinstance(parsed, Mapping):
+                    raise ValueError("target_hint must be a JSON object")
+                parsed_target = normalize_target_box(parsed)
             archive = generate_campaign_zip(
                 image_bytes,
                 source_name=image.filename or "uploaded_product",
@@ -680,6 +946,8 @@ def create_app() -> Any:
                     "category": category or "",
                     "tone": tone,
                 },
+                language=language,
+                target_box=parsed_target,
                 seed=seed,
                 request_context={
                     "generation_id": generation_id,
@@ -688,7 +956,7 @@ def create_app() -> Any:
                     "language": language,
                 },
             )
-        except PipelineError as exc:
+        except (PipelineError, ValueError, json.JSONDecodeError) as exc:
             from fastapi import HTTPException
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return Response(
@@ -706,6 +974,7 @@ def create_app() -> Any:
                 product_name=str(payload.get("product_name", "")),
                 category=str(payload.get("category", "")),
                 tone=str(payload.get("tone", "premium")),
+                language=str(payload.get("language", "fr")),
                 metadata=payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else None,
             )
         except PipelineError as exc:
