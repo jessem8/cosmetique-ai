@@ -367,17 +367,38 @@ def remove_product_background(image: Image.Image) -> tuple[Image.Image, Image.Im
         ) from exc
 
     if _RMBG_SESSION is None:
-        _RMBG_SESSION = new_session("isnet-general-use")
+        # The Colab runtime can expose CUDA/TensorRT providers which work in a
+        # preflight but fail as soon as rembg performs its first inference.
+        # Isolation is deliberately CPU-pinned: it is small relative to the
+        # original SDXL workload, deterministic, and avoids competing with
+        # Paddle/torch for the CUDA runtime.
+        _RMBG_SESSION = new_session(
+            "isnet-general-use", providers=["CPUExecutionProvider"]
+        )
 
-    cutout = remove(
-        image.convert("RGBA"),
-        session=_RMBG_SESSION,
-        alpha_matting=True,
-        alpha_matting_foreground_threshold=240,
-        alpha_matting_background_threshold=10,
-        alpha_matting_erode_size=10,
-        post_process_mask=True,
-    ).convert("RGBA")
+    rgba = image.convert("RGBA")
+    try:
+        cutout = remove(
+            rgba,
+            session=_RMBG_SESSION,
+            alpha_matting=True,
+            alpha_matting_foreground_threshold=240,
+            alpha_matting_background_threshold=10,
+            alpha_matting_erode_size=10,
+            post_process_mask=True,
+        ).convert("RGBA")
+    except Exception:
+        # Alpha matting is a quality enhancement.  A provider-specific
+        # matting failure must not terminate the whole campaign request.
+        try:
+            cutout = remove(
+                rgba,
+                session=_RMBG_SESSION,
+                alpha_matting=False,
+                post_process_mask=True,
+            ).convert("RGBA")
+        except Exception as exc:
+            raise PipelineError("Product isolation failed in the Colab runtime") from exc
     mask = cutout.getchannel("A")
     if mask.getbbox() is None:
         raise PipelineError("rembg returned an empty product mask")
