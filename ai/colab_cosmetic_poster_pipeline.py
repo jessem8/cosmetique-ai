@@ -714,7 +714,7 @@ def generate_campaign_zip(
     roi_inputs = [roi]
     if normalized_target:
         roi_inputs.insert(0, isolation_input)
-    ocr = read_product_label(image, roi_inputs=roi_inputs)
+    ocr = read_product_label(image, roi_images=roi_inputs)
     timings["ocr_seconds"] = round(time.perf_counter() - stage, 3)
     metadata = infer_product_metadata(ocr, metadata_overrides)
     stage = time.perf_counter()

@@ -24,7 +24,8 @@ def test_generate_campaign_zip_orchestrates_square_and_wide_scenes(monkeypatch) 
     cutout = Image.new("RGBA", (64, 64), (20, 100, 140, 255))
     product_mask = Image.new("L", (64, 64), 255)
 
-    def fake_read_label(image: Image.Image, *, roi_inputs=()):
+    def fake_read_label(image: Image.Image, *, roi_images=()):
+        assert len(roi_images) == 1
         return {"text": "Rexona Shower Fresh", "items": [{"text": "Rexona", "confidence": 0.99}]}
 
     def fake_metadata(ocr, overrides=None):
