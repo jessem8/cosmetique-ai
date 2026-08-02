@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.request
 from importlib import metadata as importlib_metadata
 from pathlib import Path
@@ -1021,6 +1022,15 @@ def create_app() -> Any:
         except (PipelineError, ValueError, json.JSONDecodeError) as exc:
             from fastapi import HTTPException
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            # Uvicorn otherwise returns only a blank 500 to Docker.  Keep the
+            # response bounded but record the complete traceback in the
+            # Colab API log, so an unexpected provider/library failure is
+            # diagnosable without guessing from the website.
+            print("COLAB_CAMPAIGN_EXCEPTION\n" + traceback.format_exc(), flush=True)
+            from fastapi import HTTPException
+            detail = f"{type(exc).__name__}: {str(exc)}".strip()[:500]
+            raise HTTPException(status_code=500, detail=detail) from exc
         return Response(
             content=archive,
             media_type="application/zip",

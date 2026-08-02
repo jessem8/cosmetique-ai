@@ -448,9 +448,10 @@ class GenerationWorker:
                 self._install_success(generation, bundle, runtime_id)
         except Exception as exc:
             logger.error(
-                "generation_failed generation_id=%s error_type=%s",
+                "generation_failed generation_id=%s error_type=%s error=%s",
                 generation_id,
                 type(exc).__name__,
+                str(exc)[:500],
             )
             self._fail_or_retry(generation_id, exc)
 

@@ -85,7 +85,11 @@ class AIClient:
         if response.status_code in {401, 403}:
             raise AIRemoteAuthFailed("Authentification Colab refusée.")
         if response.status_code == 429 or response.status_code >= 500:
-            raise AIServiceUnavailable("Service Colab indisponible.")
+            detail = response.text[:300].strip()
+            message = "Service Colab indisponible."
+            if detail:
+                message += f" {detail}"
+            raise AIServiceUnavailable(message)
         if response.status_code >= 400:
             detail = response.text[:300].strip()
             raise AIProtocolError(
