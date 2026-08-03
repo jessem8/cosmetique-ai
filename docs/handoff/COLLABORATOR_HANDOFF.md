@@ -15,7 +15,7 @@ browser → local Nginx/React → FastAPI + PostgreSQL + worker
                               private local artifacts
 ```
 
-Docker does not load the image or language models. The Colab pipeline preserves
+Docker does not load image-generation or language models. The Colab pipeline preserves
 the photographed product, generates the scene around it, writes claim-safe
 copy, and returns one validated campaign ZIP. A missing or unhealthy Colab
 runtime is an explicit failure; it is never silently replaced by a CPU or fake
