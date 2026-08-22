@@ -1,129 +1,40 @@
-# Cosmetique AI operations
+# Cosmetique AI V2 operations
 
-This runbook covers the V1 deployment: a private local Docker application using
-an authenticated, session-based Google Colab GPU service. A Colab runtime and a
-ngrok tunnel are temporary infrastructure; neither is treated as always-on
-production hosting.
+The active Colab integration is Campaign Studio V2. The historical V1 poster service is not an accepted runtime for the new Studio.
 
-## Trust boundaries
+## Colab
 
-- The browser talks only to the local same-origin `/api/v1` API.
-- The backend and worker keep the Colab URL and bearer token server-side.
-- Colab receives only the uploaded image bytes and the validated generation
-  request. It never receives PostgreSQL, storage, or website JWT credentials.
-- PostgreSQL is attached only to the internal Docker network and has no host
-  port.
-- Product originals and generated artifacts are private objects served through
-  authenticated API routes.
+Open `notebook/pipeline_ia_cosmetique.ipynb`, select a T4 GPU, add the V2 Colab Secrets, and run the cells in order. The final cell starts an authenticated temporary ngrok tunnel for the `/v2/*` API. A healthy response must contain `primary_engine: colab-v2`, `status: ready`, a runtime ID, and resolved model revisions.
 
-## Prerequisites
+## Secrets
 
-- Docker Desktop with Docker Compose v2.
-- A Google account with access to a Colab T4 runtime.
-- Enough local disk for PostgreSQL and the persistent artifact volume.
-- A modern browser.
+- `GITHUB_TOKEN` or `GH_TOKEN`: private checkpoint clone, read-only.
+- `HF_TOKEN` or `HUGGINGFACE_TOKEN`: optional Hugging Face authentication.
+- `NGROK_AUTHTOKEN`: temporary tunnel.
+- `COLAB_AI_TOKEN`: V2 bearer token.
 
-## Start the Colab service
+Do not put these values in Git, screenshots, notebook source, or browser-visible configuration.
 
-1. Open the production notebook in `notebook/` with Google Colab.
-2. Select a T4 GPU runtime.
-3. Add `NGROK_AUTHTOKEN` to Colab Secrets; the notebook creates a separate
-   temporary bearer token for the service.
-4. Choose **Runtime → Run all**.
-5. Wait for the health check to report `ready: true`.
-6. Copy the generated ngrok URL and `COLAB_AI_TOKEN` into the local
-   `docker/.env` as `COLAB_AI_URL` and `AI_SERVICE_TOKEN`.
-
-The final notebook cell starts ngrok for the local FastAPI service on port 8000.
-Only one GPU campaign is executed at a time.
-
-## Configure the local stack
-
-Copy the safe template:
+## V2 API checks
 
 ```powershell
-Copy-Item .\docker\.env.example .\docker\.env
+$headers = @{ Authorization = 'Bearer <COLAB_AI_TOKEN>' }
+Invoke-RestMethod '<COLAB_V2_URL>/v2/health' -Headers $headers
 ```
 
-Replace every `replace_...` value. Generate each secret independently; never
-reuse the website JWT key, database password, or Colab bearer token.
+Expected state is `status=ready` and `primary_engine=colab-v2`. A missing model, missing GPU, expired runtime, or failed provider must be surfaced as unavailable/review-required; it must never become a fake successful campaign.
 
-```powershell
-python -c "import secrets; print(secrets.token_urlsafe(48))"
+## V2 request flow
+
+```text
+source image → Grounding DINO proposal/contamination check → SAM2 Product Lock
+             → optional correction revision → structured scene brief
+             → local Diffusers background edit → original product restoration
+             → pixel/duplicate/person/hand QA → variant manifest/export
 ```
 
-`DATABASE_URL` must contain the same database name, user, and password as
-`DB_NAME`, `DB_USER`, and `DB_PASSWORD`. Percent-encode an arbitrary password
-before placing it in a URL, or use the URL-safe generator above.
+`POST /v2/batches` returns one terminal row per submitted image: `ready`, `needs_review`, or `failed`. No image is silently skipped.
 
-## Start and verify Docker
+## Runtime recovery
 
-From the repository root:
-
-```powershell
-docker compose --env-file .\docker\.env -f .\docker\docker-compose.yml config
-docker compose --env-file .\docker\.env -f .\docker\docker-compose.yml up --build -d
-docker compose --env-file .\docker\.env -f .\docker\docker-compose.yml ps
-```
-
-Open `http://localhost:<APP_PORT>`. The first startup applies Alembic migrations
-before the API and worker start. The frontend starts only after the backend is
-healthy.
-
-Inspect sanitized service logs when troubleshooting:
-
-```powershell
-docker compose --env-file .\docker\.env -f .\docker\docker-compose.yml logs --tail 200 backend worker
-```
-
-Never paste full environment output or authorization headers into tickets or
-chat.
-
-## Colab runtime recovery
-
-A stopped or replaced Colab runtime is expected to fail jobs explicitly with
-`AI_RUNTIME_LOST` or `AI_SERVICE_UNAVAILABLE`; it must never produce a degraded
-successful campaign.
-
-1. Start a new T4 runtime and run the notebook from the top.
-2. Create a new bearer token.
-3. Wait for the new runtime health response and note its new runtime ID.
-4. Update only `COLAB_AI_URL` and `AI_SERVICE_TOKEN` in `docker/.env`.
-5. Recreate the backend and worker:
-
-   ```powershell
-   docker compose --env-file .\docker\.env -f .\docker\docker-compose.yml up -d --force-recreate backend worker
-   ```
-
-6. Create a new campaign. A terminal failed generation remains immutable.
-
-The worker recovers expired processing leases after a restart. It does not
-duplicate a bundle already stored and validated.
-
-## Stop and preserve data
-
-```powershell
-docker compose --env-file .\docker\.env -f .\docker\docker-compose.yml down
-```
-
-This preserves the named PostgreSQL and artifact volumes. Removing volumes
-deletes local application data and is intentionally not part of the routine
-shutdown command.
-
-## Private evaluation data
-
-Keep authorized originals, annotations, and expert masks outside Git. The
-recommended ignored in-repository mount point is `data/evaluation/private/`; a
-separate access-controlled directory may be used instead. See
-`docs/EVALUATION.md`.
-
-## Failure interpretation
-
-| Code | Meaning | Operator action |
-| --- | --- | --- |
-| `AI_SERVICE_UNAVAILABLE` | Colab health preflight failed | Start/reconnect Colab, then retry as a new generation |
-| `AI_RUNTIME_LOST` | Runtime identity changed during a job | Reconnect the new runtime; do not reuse the old job |
-| `TARGET_AMBIGUOUS` | More than one plausible product | Select a displayed candidate; create a new generation |
-| `CLAIM_SAFETY_FAILED` | Copy was not supported by verified facts | Correct the brief; do not blindly retry |
-| `ARTIFACT_CONTRACT_FAILED` | The returned ZIP is malformed or inconsistent | Inspect sanitized worker logs and AI diagnostics |
-| `GENERATION_STALE` | The bounded remote deadline expired | Check the Colab runtime and create a new generation |
+A new Colab runtime changes the URL and runtime ID. Stop using the old endpoint, start the notebook from the top, update the V2 client URL/token, and create new jobs. Do not retry a job whose remote completion is unknown.

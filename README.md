@@ -1,92 +1,49 @@
-# Cosmetique AI
+# Cosmetique AI — Campaign Studio V2
 
-Colab-first cosmetic campaign generation for product photos. The photographed
-product is removed with rembg, its label is read with PaddleOCR, a category-aware
-SDXL inpainting scene is generated around the preserved product, and all copy is
-rendered deterministically with Pillow.
+Campaign Studio V2 is the product-preserving cosmetics image engine. Its Colab entry point loads the pinned Grounding DINO, SAM2, and Diffusers snapshots once per GPU runtime, creates immutable product locks, restores the original product pixels after scene generation, runs fail-closed QA, and exposes authenticated `/v2/*` endpoints.
 
-## Canonical pipeline
+## V2 source of truth
 
-The source of truth is:
+- `notebook/pipeline_ia_cosmetique.ipynb` — V2-only Colab bootstrap and smoke test
+- `ai/colab_v2_runtime.py` — model registry, proposal consensus, SAM2 lock engine
+- `ai/colab_v2_service.py` — real Transformers/Diffusers adapters, V2 API, and batch service
+- `ai_service/` — immutable lock, scene, provider, restoration, and QA contracts
+- `frontend/`, `backend/`, `docker/` — website and durable storage layers
 
-- `ai/colab_cosmetic_poster_pipeline.py`
-- `ai/campaign_core.py`
-- `notebook/pipeline_ia_cosmetique.ipynb`
+The historical V1 poster module remains in the repository only for compatibility with old records and tests. The V2 notebook, V2 Colab API, and V2 smoke path do not import or execute it.
 
-The Google Drive clone and the Downloads notebook/ZIP are reference material.
-They are not the delivery target.
+## Colab secrets
 
-Pipeline:
+Add these in Colab **Secrets**; never paste them into cells or commit them:
 
-```text
-image → EXIF normalization → PaddleOCR → rembg isnet-general-use
-      → SDXL Inpainting around preserved product → Qwen2.5 strict JSON
-      → Pillow typography → three platform exports → ZIP
-```
+- `GITHUB_TOKEN` or `GH_TOKEN`: fine-grained read access to the private checkpoint branch.
+- `HF_TOKEN` or `HUGGINGFACE_TOKEN`: optional for public snapshots; required if a model license/account requires Hub authentication.
+- `NGROK_AUTHTOKEN`: temporary HTTPS tunnel authentication.
+- `COLAB_AI_TOKEN`: recommended high-entropy bearer token for `/v2/*`; the notebook generates one if absent.
 
-SDXL is forbidden from drawing text, logos, packaging, extra products, vases,
-fruit, people, hands, floating objects, or a generic magenta studio. The source
-product is composited back after generation and receives a deterministic contact
-shadow.
+Select a T4 GPU and run the notebook cells in order. The runtime cell must print `primary_engine: colab-v2` and `status: ready`. The smoke cell must produce an accepted lock before generation; ambiguous or contaminated inputs stop for correction instead of generating a fake result. The final cell starts the authenticated V2 API and verifies `/v2/health`.
 
-## Output contract
-
-Each campaign ZIP contains:
-
-- `instagram.jpg` — 1080×1080
-- `facebook.jpg` — 1200×630
-- `linkedin.jpg` — 1200×627
-- `copy.json` — strict brand/product/category/titre/sous-titre/bullets/CTA/hashtags contract
-- `ocr.json` — OCR text and confidence values
-- `cutout.png`, `mask.png`, `background.jpg` — product-isolation evidence
-- `manifest.json` — models, category, seed, provenance, and product-pixel preservation flag
-
-All nine members are required by the website's pipeline 1.2.0 finalization
-contract; partial or diagnostic-only ZIPs are never delivered.
-
-## Colab API
-
-Run the notebook on a Colab GPU runtime. It exposes:
+## V2 API
 
 ```text
-GET  /health
-POST /generate-campaign
-POST /generate-text
+GET  /v2/health
+POST /v2/product-locks
+GET  /v2/product-locks/{lock_id}
+POST /v2/product-locks/{lock_id}/refinements
+GET  /v2/product-locks/{lock_id}/artifacts/{artifact}
+POST /v2/generations
+GET  /v2/generations/{generation_id}
+GET  /v2/generations/{generation_id}/variants/{variant_index}/image
+POST /v2/batches
 ```
 
-Set `NGROK_AUTHTOKEN` before running the final notebook cell. The cell prints
-the temporary ngrok URL and a generated `COLAB_AI_TOKEN`; copy both into the
-Docker environment as `COLAB_AI_URL` and `AI_SERVICE_TOKEN`.
+Every request is bearer-authenticated when `COLAB_AI_TOKEN` is configured. The health response reports the runtime ID, resolved model revisions, device, and optional-model failures.
 
-## Website and Docker
-
-Docker remains model-free. The existing FastAPI/PostgreSQL worker uploads the
-product to Colab, validates the returned ZIP, stores the assets in its private
-artifact volume, and exposes the existing frontend asset URLs. When Colab is
-missing or unavailable, the generation becomes an explicit error.
+## Local verification
 
 ```powershell
-docker compose --env-file .\\docker\\.env -f .\\docker\\docker-compose.yml config
-docker compose --env-file .\\docker\\.env -f .\\docker\\docker-compose.yml up --build -d
+python -m pytest ai/tests
+python -c "import nbformat; p='notebook/pipeline_ia_cosmetique.ipynb'; nb=nbformat.read(p, as_version=4); nbformat.validate(nb); print('notebook valid')"
 ```
 
-The database and worker were retained to avoid a schema/frontend rewrite; no
-local AI fallback is used.
-
-## Verification
-
-Run focused Python tests for `ai/` and `backend/`, validate the notebook with
-`nbformat.validate`, and run `docker compose config`. GPU acceptance is
-performed in Colab using real dataset images, including Rexona and Lancôme, then
-the website is tested with a different arbitrary image.
-
-## Repository layout
-
-```text
-ai/         canonical Colab pipeline and deterministic rendering
-notebook/   canonical Colab runner
-backend/    website API, queue worker, ZIP validation, private storage
-frontend/   existing product interface
-docker/     PostgreSQL, API, worker, and frontend Compose stack
-ai_core/    schema-only compatibility package for the website backend
-```
+A fresh T4 run with authorized product images is still an external acceptance gate. CPU tests prove contracts and fake-adapter behavior; they do not prove that Colab downloaded the real snapshots or produced acceptable images.

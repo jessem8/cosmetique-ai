@@ -1,56 +1,57 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import nbformat
 
 
-def test_canonical_notebook_is_valid_and_has_no_demo_copy() -> None:
-    path = Path(__file__).parents[2] / "notebook" / "pipeline_ia_cosmetique.ipynb"
-    notebook = nbformat.read(path, as_version=4)
-    nbformat.validate(notebook)
-    source = "\n".join(
+NOTEBOOK = Path(__file__).parents[2] / "notebook" / "pipeline_ia_cosmetique.ipynb"
+
+
+def _code_source() -> str:
+    notebook = nbformat.read(NOTEBOOK, as_version=4)
+    return "\n".join(
         "".join(cell.get("source", []))
         for cell in notebook.cells
         if cell.cell_type == "code"
-    ).casefold()
-    for placeholder in ("maison exemple", "hydra glow serum", "sérum éclat"):
-        assert placeholder not in source
+    )
 
 
-def test_source_bootstrap_supports_an_explicit_uploaded_archive_without_force_reset() -> None:
-    path = Path(__file__).parents[2] / "notebook" / "pipeline_ia_cosmetique.ipynb"
-    notebook = nbformat.read(path, as_version=4)
-    source_cell = next(cell for cell in notebook.cells if cell.get("id") == "source")
-    source = "".join(source_cell["source"])
+def test_canonical_notebook_is_valid_and_v2_only() -> None:
+    notebook = nbformat.read(NOTEBOOK, as_version=4)
+    nbformat.validate(notebook)
+    source = _code_source()
+    lowered = source.casefold()
+    for legacy in (
+        "colab_cosmetic_poster_pipeline",
+        "campaign_core",
+        "generate_campaign_zip",
+        "ollama",
+        "run_public_server(",
+        "pipeline_version = \"1.2.0\"",
+    ):
+        assert legacy not in lowered
+    for required in (
+        "colab_v2_service",
+        "build_service",
+        "run_public_v2_server",
+        "codex/campaign-studio-upgrade-checkpoint",
+        "COLAB_AI_TOKEN",
+        "/v2/health",
+    ):
+        assert required in source
 
-    assert "SOURCE_MODE" in source
-    assert "uploaded_archive" in source
-    assert "zipfile.ZipFile" in source
-    assert "--force" not in source
-    assert "shutil.rmtree(repo_dir" not in source
-    assert "requirements-colab.lock" in source
-    assert "CampaignStudioV2Runtime" in source
+
+def test_notebook_has_the_deliberate_v2_execution_order() -> None:
+    notebook = nbformat.read(NOTEBOOK, as_version=4)
+    ids = [cell.get("id") for cell in notebook.cells]
+    assert ids == ["intro", "bootstrap", "source", "runtime", "smoke", "server"]
+    assert "requirements-colab.lock" in _code_source()
 
 
-def test_install_cell_does_not_upgrade_the_inference_stack_unpinned() -> None:
-    path = Path(__file__).parents[2] / "notebook" / "pipeline_ia_cosmetique.ipynb"
-    notebook = nbformat.read(path, as_version=4)
-    install_cell = next(cell for cell in notebook.cells if cell.get("id") == "install")
-    source = "".join(install_cell["source"])
-
-    assert "requirements-colab.lock" not in source
-    assert "rembg onnxruntime-gpu paddleocr" not in source
-    assert "huggingface_hub" in source
-
-
-def test_install_cell_defers_inference_dependencies_to_the_pinned_repository_lock() -> None:
-    path = Path(__file__).parents[2] / "notebook" / "pipeline_ia_cosmetique.ipynb"
-    notebook = nbformat.read(path, as_version=4)
-    install_cell = next(cell for cell in notebook.cells if cell.get("id") == "install")
-    source = "".join(install_cell["source"])
-
-    assert 'Pillow==' not in source
-    assert 'rembg onnxruntime-gpu paddleocr' not in source
-    assert 'huggingface_hub' in source
+def test_colab_lock_excludes_historical_v1_inference_dependencies() -> None:
+    lock = (NOTEBOOK.parents[1] / "ai" / "requirements-colab.lock").read_text(encoding="utf-8")
+    for legacy in ("rembg", "paddleocr", "paddlepaddle", "ollama"):
+        assert legacy not in lock
+    for required in ("diffusers==", "transformers==", "huggingface_hub==", "fastapi=="):
+        assert required in lock

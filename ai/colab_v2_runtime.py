@@ -52,11 +52,14 @@ class ResolvedModel:
 
 
 DEFAULT_MODELS = (
-    ModelSpec("grounding_dino", "IDEA-Research/grounding-dino-base", "e76a695ed7ae1032a61530cce4b4e9b65f4e368b"),
-    ModelSpec("sam2", "facebook/sam2-hiera-large", "main"),
-    ModelSpec("dfine", os.getenv("COLAB_DFINE_REPO", "ustc-community/dfine"), os.getenv("COLAB_DFINE_REVISION", "main"), required=False),
+    ModelSpec("grounding_dino", "IDEA-Research/grounding-dino-base", os.getenv("COLAB_GROUNDING_DINO_REVISION", "main")),
+    ModelSpec("sam2", "facebook/sam2-hiera-large", os.getenv("COLAB_SAM2_REVISION", "main")),
     ModelSpec("inpaint", os.getenv("COLAB_INPAINT_REPO", "diffusers/stable-diffusion-xl-1.0-inpainting-0.1"), os.getenv("COLAB_INPAINT_REVISION", "main")),
 )
+if os.getenv("COLAB_ENABLE_DFINE", "0").casefold() in {"1", "true", "yes"}:
+    DEFAULT_MODELS = DEFAULT_MODELS + (
+        ModelSpec("dfine", os.getenv("COLAB_DFINE_REPO", "ustc-community/dfine"), os.getenv("COLAB_DFINE_REVISION", "main"), required=False),
+    )
 
 
 class ModelRegistry:
@@ -133,6 +136,12 @@ class ColabProductLockEngine:
         primary = self.proposal.propose(image, prompt=prompt)
         if self.dfine is None:
             return primary
+        try:
+            return tuple(primary) + tuple(self.dfine.propose(image, prompt=prompt))
+        except Exception:
+            # D-FINE is an optional corroborator. Its failure must never be
+            # converted into a clean lock.
+            return primary
 
     @staticmethod
     def _iou(left: NormalizedBox, right: NormalizedBox) -> float:
@@ -153,13 +162,6 @@ class ColabProductLockEngine:
             if all(cls._iou(proposal.box, accepted.box) < 0.65 for accepted in distinct):
                 distinct.append(proposal)
         return len(distinct)
-        try:
-            return tuple(primary) + tuple(self.dfine.propose(image, prompt=prompt))
-        except Exception:
-            # D-FINE is an optional corroborator.  Its absence is recorded by
-            # runtime health and never silently converted into a clean lock.
-            return primary
-
     def inspect(self, image: Image.Image) -> DetectorConsensus:
         products = self._proposals(image, "cosmetic product packaging")
         selected = select_proposal(products, minimum_score=0.55, ambiguity_margin=0.08)
