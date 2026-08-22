@@ -63,12 +63,8 @@ class TransformersGroundingDINO:
             self.model,
             self.device,
         )
-        if self.device == "cuda":
-            with torch.autocast(device_type="cuda", dtype=torch.float16), torch.inference_mode():
-                outputs = self.model(**inputs)
-        else:
-            with torch.inference_mode():
-                outputs = self.model(**inputs)
+        with torch.inference_mode():
+            outputs = self.model(**inputs)
         results = self.processor.post_process_grounded_object_detection(
             outputs,
             inputs["input_ids"],
@@ -132,12 +128,8 @@ class TransformersSAM2Predictor:
             self.model,
             self.device,
         )
-        if self.device == "cuda":
-            with torch.autocast(device_type="cuda", dtype=torch.float16), torch.inference_mode():
-                outputs = self.model(**inputs, multimask_output=True)
-        else:
-            with torch.inference_mode():
-                outputs = self.model(**inputs, multimask_output=True)
+        with torch.inference_mode():
+            outputs = self.model(**inputs, multimask_output=True)
         masks = self.processor.image_processor.post_process_masks(
             outputs.pred_masks.cpu(),
             inputs["original_sizes"].cpu(),
@@ -186,7 +178,9 @@ def _load_grounding_dino(model: ResolvedModel, device: str) -> TransformersGroun
 
     processor = AutoProcessor.from_pretrained(model.path)
     load_options: dict[str, Any] = {
-        "dtype": torch.float16 if device == "cuda" else torch.float32,
+        # Keep detector weights and processor pixels in FP32. These models are
+        # released before SDXL loads, so correctness is worth the small memory cost.
+        "dtype": torch.float32,
         "low_cpu_mem_usage": True,
     }
     loaded = AutoModelForZeroShotObjectDetection.from_pretrained(model.path, **load_options)
@@ -200,7 +194,9 @@ def _load_sam2(model: ResolvedModel, device: str) -> TransformersSAM2Predictor:
 
     processor = AutoProcessor.from_pretrained(model.path)
     load_options: dict[str, Any] = {
-        "dtype": torch.float16 if device == "cuda" else torch.float32,
+        # Keep detector weights and processor pixels in FP32. These models are
+        # released before SDXL loads, so correctness is worth the small memory cost.
+        "dtype": torch.float32,
         "low_cpu_mem_usage": True,
     }
     loaded = AutoModel.from_pretrained(model.path, **load_options)
