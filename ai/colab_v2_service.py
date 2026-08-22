@@ -63,8 +63,12 @@ class TransformersGroundingDINO:
             self.model,
             self.device,
         )
-        with torch.inference_mode():
-            outputs = self.model(**inputs)
+        if self.device == "cuda":
+            with torch.autocast(device_type="cuda", dtype=torch.float16), torch.inference_mode():
+                outputs = self.model(**inputs)
+        else:
+            with torch.inference_mode():
+                outputs = self.model(**inputs)
         results = self.processor.post_process_grounded_object_detection(
             outputs,
             inputs.input_ids,
@@ -128,8 +132,12 @@ class TransformersSAM2Predictor:
             self.model,
             self.device,
         )
-        with torch.inference_mode():
-            outputs = self.model(**inputs, multimask_output=True)
+        if self.device == "cuda":
+            with torch.autocast(device_type="cuda", dtype=torch.float16), torch.inference_mode():
+                outputs = self.model(**inputs, multimask_output=True)
+        else:
+            with torch.inference_mode():
+                outputs = self.model(**inputs, multimask_output=True)
         masks = self.processor.image_processor.post_process_masks(
             outputs.pred_masks.cpu(),
             inputs["original_sizes"].cpu(),
@@ -147,12 +155,20 @@ def _device() -> str:
 
 
 def _prepare_inputs(inputs: Any, model: Any, device: str) -> Any:
-    """Move processor tensors and match floating inputs to model dtype."""
+    """Move processor tensors and match floating inputs to CUDA weights."""
+    import torch
+
     inputs = inputs.to(device)
-    try:
-        model_dtype = next(parameter for parameter in model.parameters() if parameter.is_floating_point()).dtype
-    except StopIteration:
+    dtypes = [
+        parameter.dtype
+        for parameter in model.parameters()
+        if parameter.is_floating_point()
+    ]
+    if not dtypes:
         return inputs
+    # Some vision checkpoints retain a few FP32 parameters while convolution
+    # weights are FP16. On a T4 the input must follow the CUDA convolution dtype.
+    model_dtype = torch.float16 if device == "cuda" and torch.float16 in dtypes else dtypes[0]
     for name, value in inputs.items():
         if hasattr(value, "is_floating_point") and value.is_floating_point():
             inputs[name] = value.to(dtype=model_dtype)
