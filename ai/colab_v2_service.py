@@ -71,7 +71,7 @@ class TransformersGroundingDINO:
                 outputs = self.model(**inputs)
         results = self.processor.post_process_grounded_object_detection(
             outputs,
-            inputs.input_ids,
+            inputs["input_ids"],
             threshold=float(os.getenv("COLAB_DINO_THRESHOLD", "0.35")),
             text_threshold=float(os.getenv("COLAB_DINO_TEXT_THRESHOLD", "0.25")),
             target_sizes=[(image.height, image.width)],
@@ -154,25 +154,30 @@ def _device() -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def _prepare_inputs(inputs: Any, model: Any, device: str) -> Any:
-    """Move processor tensors and match floating inputs to CUDA weights."""
+def _prepare_inputs(inputs: Any, model: Any, device: str) -> dict[str, Any]:
+    """Return plain tensors with floating inputs matched to CUDA weights."""
     import torch
 
-    inputs = inputs.to(device)
+    moved = inputs.to(device)
     dtypes = [
         parameter.dtype
         for parameter in model.parameters()
         if parameter.is_floating_point()
     ]
     if not dtypes:
-        return inputs
+        return dict(moved.items())
     # Some vision checkpoints retain a few FP32 parameters while convolution
     # weights are FP16. On a T4 the input must follow the CUDA convolution dtype.
     model_dtype = torch.float16 if device == "cuda" and torch.float16 in dtypes else dtypes[0]
-    for name, value in inputs.items():
+    prepared: dict[str, Any] = {}
+    for name, value in moved.items():
         if hasattr(value, "is_floating_point") and value.is_floating_point():
-            inputs[name] = value.to(dtype=model_dtype)
-    return inputs
+            prepared[name] = value.to(device=device, dtype=model_dtype)
+        elif hasattr(value, "to"):
+            prepared[name] = value.to(device)
+        else:
+            prepared[name] = value
+    return prepared
 
 
 def _load_grounding_dino(model: ResolvedModel, device: str) -> TransformersGroundingDINO:
