@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1200" role="img" aria-labelledby="title desc">
+  <title id="title">Fixture scene, pale aqua bathroom counter</title>
+  <desc id="desc">A believable local fixture result for comparison, not model output.</desc>
+  <rect width="1200" height="1200" fill="#dce9e6"/>
+  <rect y="710" width="1200" height="490" fill="#f4f5f2"/>
+  <path d="M0 710h1200v32H0z" fill="#c7d8d4"/>
+  <path d="M0 180h430l-90 530H0z" fill="#c7ddd9"/>
+  <path d="M860 0h340v710H860z" fill="#d2e2de"/>
+  <g opacity=".32" fill="#fff">
+    <circle cx="944" cy="180" r="11"/><circle cx="1010" cy="250" r="6"/><circle cx="880" cy="315" r="8"/><circle cx="1085" cy="396" r="10"/><circle cx="970" cy="470" r="6"/>
+  </g>
+  <ellipse cx="575" cy="1012" rx="270" ry="44" fill="#cbd0ca"/>
+  <rect x="450" y="427" width="250" height="510" rx="54" fill="#f9fbfc" stroke="#98aaa6" stroke-width="8"/>
+  <rect x="492" y="344" width="166" height="105" rx="25" fill="#303c3b"/>
+  <rect x="478" y="570" width="194" height="185" fill="#d6e8e3"/>
+  <path d="M524 607h102v22H524zM505 648h140v15H505zM536 695h78v18h-78z" fill="#24483f"/>
+  <circle cx="575" cy="801" r="29" fill="#24483f"/>
+  <path d="M564 801h22M575 790v22" stroke="#f9fbfc" stroke-width="5"/>
+  <path d="M150 900h190l45 36H105zM925 880h160l60 55H880z" fill="#bccac6"/>
+</svg>

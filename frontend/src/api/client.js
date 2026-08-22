@@ -2,6 +2,18 @@ import axios from 'axios'
 import { clearSession, getSession } from '../auth/session.js'
 
 export const API_ROOT = '/api/v1'
+// Campaign Studio V2 is intentionally kept behind one path map. If the
+// backend contract moves while the workspace is being integrated, update this
+// map rather than every view or fixture.
+export const STUDIO_V2_ROOT = '/studio/v2'
+export const STUDIO_V2_ENDPOINTS = Object.freeze({
+  productLocks: `${STUDIO_V2_ROOT}/product-locks`,
+  providerProfiles: `${STUDIO_V2_ROOT}/provider-profiles`,
+  generations: `${STUDIO_V2_ROOT}/generations`,
+  engine: `${STUDIO_V2_ROOT}/engine`,
+  directions: `${STUDIO_V2_ROOT}/directions`,
+  batches: `${STUDIO_V2_ROOT}/batches`,
+})
 const DEFAULT_TIMEOUT = 30_000
 const DOWNLOAD_TIMEOUT = 120_000
 
@@ -117,6 +129,8 @@ export const auth = {
 export const products = {
   create: (formData, { signal } = {}) =>
     client.post('/products', formData, { signal }),
+  get: (id, { signal } = {}) =>
+    client.get(`/products/${encodeURIComponent(id)}`, { signal }),
   getImage: (id, { signal } = {}) =>
     client.get(`/products/${encodeURIComponent(id)}/image`, {
       signal,
@@ -172,6 +186,114 @@ export const generations = {
       {},
       { signal }
     ),
+}
+
+const encodedId = (id) => encodeURIComponent(id)
+
+export const studioV2 = {
+  productLocks: {
+    list: ({ cursor, productId, limit = 20, signal } = {}) =>
+      client.get(STUDIO_V2_ENDPOINTS.productLocks, {
+        signal,
+        params: {
+          ...(cursor ? { cursor } : {}),
+          ...(productId ? { product_id: productId } : {}),
+          limit,
+        },
+      }),
+    create: (data, { idempotencyKey, signal } = {}) =>
+      client.post(STUDIO_V2_ENDPOINTS.productLocks, data, {
+        signal,
+        headers: {
+          'Idempotency-Key': idempotencyKey,
+        },
+      }),
+    get: (id, { signal } = {}) =>
+      client.get(`${STUDIO_V2_ENDPOINTS.productLocks}/${encodedId(id)}`, { signal }),
+    artifact: (id, artifact, { signal } = {}) =>
+      client.get(
+        `${STUDIO_V2_ENDPOINTS.productLocks}/${encodedId(id)}/artifacts/${encodeURIComponent(artifact)}`,
+        { signal, responseType: 'blob' }
+      ),
+    refine: (id, data, { signal } = {}) =>
+      client.post(
+        `${STUDIO_V2_ENDPOINTS.productLocks}/${encodedId(id)}/refine`,
+        data,
+        { signal }
+      ),
+    validate: (id, data = {}, { signal } = {}) =>
+      client.post(
+        `${STUDIO_V2_ENDPOINTS.productLocks}/${encodedId(id)}/validate`,
+        data,
+        { signal }
+      ),
+    reject: (id, data = {}, { signal } = {}) =>
+      client.post(
+        `${STUDIO_V2_ENDPOINTS.productLocks}/${encodedId(id)}/reject`,
+        data,
+        { signal }
+      ),
+  },
+  providerProfiles: {
+    list: ({ signal } = {}) =>
+      client.get(STUDIO_V2_ENDPOINTS.providerProfiles, { signal }),
+  },
+  engine: {
+    status: ({ signal } = {}) =>
+      client.get(`${STUDIO_V2_ENDPOINTS.engine}/status`, { signal }),
+  },
+  directions: {
+    preview: (data, { signal } = {}) =>
+      client.post(`${STUDIO_V2_ENDPOINTS.directions}/preview`, data, { signal }),
+  },
+  batches: {
+    list: ({ cursor, limit = 20, signal } = {}) =>
+      client.get(STUDIO_V2_ENDPOINTS.batches, {
+        signal,
+        params: { ...(cursor ? { cursor } : {}), limit },
+      }),
+    create: (data, { idempotencyKey, signal } = {}) =>
+      client.post(STUDIO_V2_ENDPOINTS.batches, data, {
+        signal,
+        headers: { 'Idempotency-Key': idempotencyKey },
+      }),
+    get: (id, { signal } = {}) =>
+      client.get(`${STUDIO_V2_ENDPOINTS.batches}/${encodedId(id)}`, { signal }),
+  },
+  generations: {
+    create: (data, { idempotencyKey, signal } = {}) =>
+      client.post(STUDIO_V2_ENDPOINTS.generations, data, {
+        signal,
+        headers: {
+          'Idempotency-Key': idempotencyKey,
+        },
+      }),
+    get: (id, { signal } = {}) =>
+      client.get(`${STUDIO_V2_ENDPOINTS.generations}/${encodedId(id)}`, { signal }),
+    list: ({ cursor, limit = 20, signal } = {}) =>
+      client.get(STUDIO_V2_ENDPOINTS.generations, {
+        signal,
+        params: {
+          ...(cursor ? { cursor } : {}),
+          limit,
+        },
+      }),
+    cancel: (id, { signal } = {}) =>
+      client.post(`${STUDIO_V2_ENDPOINTS.generations}/${encodedId(id)}/cancel`, {}, { signal }),
+    variants: (id, { signal } = {}) =>
+      client.get(`${STUDIO_V2_ENDPOINTS.generations}/${encodedId(id)}/variants`, { signal }),
+    variantImage: (generationId, variantId, { signal } = {}) =>
+      client.get(
+        `${STUDIO_V2_ENDPOINTS.generations}/${encodedId(generationId)}/variants/${encodedId(variantId)}/image`,
+        { signal, responseType: 'blob' }
+      ),
+    exportBundle: (id, { signal } = {}) =>
+      client.get(`${STUDIO_V2_ENDPOINTS.generations}/${encodedId(id)}/export`, {
+        signal,
+        responseType: 'blob',
+        timeout: DOWNLOAD_TIMEOUT,
+      }),
+  },
 }
 
 export default client

@@ -27,6 +27,7 @@ build/
 coverage/
 playwright-report/
 test-results/
+.vitest-localstorage.json
 
 # Runtime and private data
 uploads/

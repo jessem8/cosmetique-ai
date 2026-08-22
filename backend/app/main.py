@@ -17,6 +17,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from app.core.config import settings
 from app.core.rate_limit import limiter
 from app.routers import auth, generations, products
+from app.routers import generation_v2, product_locks
 
 
 logging.basicConfig(
@@ -56,7 +57,11 @@ async def stable_generation_validation_error(
     route = request.scope.get("route")
     if (
         request.method == "POST"
-        and getattr(route, "endpoint", None) is generations.create_generation
+        and (
+            getattr(route, "endpoint", None) is generations.create_generation
+            or request.url.path.startswith("/api/v2/")
+            or "/studio/v2/" in request.url.path
+        )
     ):
         return JSONResponse(
             status_code=422,
@@ -95,6 +100,12 @@ API_PREFIX = "/api/v1"
 app.include_router(auth.router, prefix=API_PREFIX)
 app.include_router(products.router, prefix=API_PREFIX)
 app.include_router(generations.router, prefix=API_PREFIX)
+# V2 has its own explicit prefix and never changes the V1 route contracts.
+app.include_router(product_locks.router)
+app.include_router(product_locks.alias_router)
+app.include_router(product_locks.studio_router)
+app.include_router(generation_v2.router)
+app.include_router(generation_v2.studio_router)
 
 
 @app.get("/health", include_in_schema=False)

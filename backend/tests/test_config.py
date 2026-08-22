@@ -33,7 +33,16 @@ def test_cors_origins_must_be_exact_http_origins(origin):
         )
 
 
-def test_production_requires_https_ai_service_and_strong_token():
+def test_production_allows_v2_without_legacy_colab_but_validates_it_when_set():
+    settings = Settings(
+        **{key: value for key, value in BASE.items() if key != "AI_SERVICE_TOKEN"},
+        APP_ENV="production",
+        CORS_ORIGINS="https://studio.example",
+        COLAB_AI_URL="",
+        AI_SERVICE_TOKEN="",
+    )
+    assert settings.COLAB_AI_URL == ""
+
     with pytest.raises(ValidationError):
         Settings(
             **BASE,

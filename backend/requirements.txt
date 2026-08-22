@@ -30,3 +30,9 @@ python-dotenv==1.2.2
 
 # ── Image inspection and artifact validation ─────────────────────
 Pillow==12.3.0
+
+# CPU ONNX product-lock baseline used by the integrated V2 worker.  The
+# lightweight adapter executes U2Net directly and avoids rembg's optional
+# pymatting/numba import chain, which is not stable in this CPU image.
+numpy==2.2.6
+onnxruntime==1.29.0

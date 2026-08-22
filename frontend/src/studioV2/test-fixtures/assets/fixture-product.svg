@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 900" role="img" aria-labelledby="title desc">
+  <title id="title">Fixture cosmetic bottle</title>
+  <desc id="desc">A neutral studio fixture showing a skincare bottle for product lock review.</desc>
+  <rect width="900" height="900" fill="#edf0f3"/>
+  <rect x="160" y="110" width="580" height="680" fill="#e1e5e9"/>
+  <ellipse cx="450" cy="763" rx="230" ry="40" fill="#c9d0d7"/>
+  <rect x="354" y="151" width="192" height="88" rx="26" fill="#30353d"/>
+  <rect x="316" y="218" width="268" height="500" rx="58" fill="#f9fbfc" stroke="#9ea8b2" stroke-width="8"/>
+  <rect x="344" y="356" width="212" height="188" fill="#d6e8e3"/>
+  <path d="M396 393h108v23H396zM377 434h146v15H377zM404 480h92v18h-92z" fill="#24483f"/>
+  <circle cx="450" cy="590" r="30" fill="#24483f"/>
+  <path d="M439 590h22M450 579v22" stroke="#f9fbfc" stroke-width="5"/>
+</svg>

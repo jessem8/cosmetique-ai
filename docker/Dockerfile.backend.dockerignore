@@ -3,6 +3,8 @@
 !backend/**
 !ai_core/
 !ai_core/**
+!ai_service/
+!ai_service/**
 !ai/
 !ai/assets/
 !ai/assets/fonts/

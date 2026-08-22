@@ -7,9 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "vitest",
-    "test:run": "vitest run",
-    "test:a11y": "vitest run src/App.a11y.test.jsx",
+    "test": "set NODE_OPTIONS=--localstorage-file=.vitest-localstorage.json&& vitest",
+    "test:run": "set NODE_OPTIONS=--localstorage-file=.vitest-localstorage.json&& vitest run",
+    "test:a11y": "set NODE_OPTIONS=--localstorage-file=.vitest-localstorage.json&& vitest run src/App.a11y.test.jsx src/pages/CampaignStudioV2.test.jsx",
     "test:e2e": "playwright test",
     "lint": "eslint . --max-warnings=0"
   },

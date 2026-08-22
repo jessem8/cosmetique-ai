@@ -22,6 +22,19 @@ from app.models import (
     GenerationStage,
     GenerationStatus,
 )
+from ai_core.schemas import (
+    BudgetEnvelope,
+    GenerationManifestV2,
+    GenerationRequestV2,
+    NormalizedBox,
+    ProductLockPrompts,
+    ProductLockRevisionCreate,
+    ProductLockStatus,
+    ProviderCapabilities,
+    ProviderSelection,
+    SceneSpec,
+    SourceImageBinding,
+)
 
 
 class StrictModel(BaseModel):
@@ -82,6 +95,10 @@ class ProductOut(StrictModel):
     brand: str | None
     category: str
     image_url: str
+    source_sha256: str | None = None
+    source_width: int | None = None
+    source_height: int | None = None
+    source_exif_orientation: int | None = None
     created_at: datetime
 
 
@@ -204,3 +221,111 @@ class GenerationOut(StrictModel):
 class GenerationHistory(StrictModel):
     items: list[GenerationOut]
     next_cursor: str | None
+
+
+# ---------------------------------------------------------------------------
+# Campaign Studio V2 contracts.  These are API-facing projections of the
+# canonical ai_core models.  Private storage keys and provider credentials are
+# intentionally absent from every response model.
+
+
+class ProductLockRevisionOut(StrictModel):
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())
+
+    id: uuid.UUID
+    product_id: uuid.UUID
+    revision: int = Field(ge=1)
+    status: ProductLockStatus
+    source: SourceImageBinding
+    parent_revision_id: uuid.UUID | None = None
+    prompts: ProductLockPrompts
+    scene: SceneSpec | None = None
+    target_box: NormalizedBox | None = None
+    source_image_url: str | None = None
+    mask_url: str | None = None
+    cutout_url: str | None = None
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
+    metrics: dict[str, float] = Field(default_factory=dict)
+    model_provenance: dict[str, str] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class ProductLockAction(StrictModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def clean_reason(cls, value: str | None) -> str | None:
+        return _clean_text(value)
+
+
+class ProductLockRevisionList(StrictModel):
+    items: list[ProductLockRevisionOut]
+    total: int = Field(ge=0)
+
+
+class ProductLockRootCreate(ProductLockRevisionCreate):
+    """Compatibility body for the root Studio V2 endpoint.
+
+    The canonical endpoint keeps ``product_id`` in the URL; this projection
+    is only for clients mounted below ``/studio/v2``.
+    """
+
+    product_id: uuid.UUID
+
+
+class ProviderProfileOut(StrictModel):
+    """Safe capability projection; no host, token, or secret is returned."""
+
+    selection: ProviderSelection
+    capabilities: ProviderCapabilities
+    id: str | None = None
+    name: str | None = None
+    model: str | None = None
+    description: str | None = None
+    capability_flags: list[str] = Field(default_factory=list)
+
+
+class GenerationV2Out(StrictModel):
+    id: uuid.UUID
+    product_id: uuid.UUID
+    product_lock_revision_id: uuid.UUID
+    contract_version: str
+    lifecycle_status: str
+    # ``status`` is a compatibility projection for the Studio V2 browser;
+    # lifecycle_status remains the canonical persisted field.
+    status: str | None = None
+    request_hash: str
+    request: GenerationRequestV2
+    provider: ProviderSelection
+    provider_execution_plan: dict[str, Any] | None = None
+    variant_count: int = Field(ge=1, le=32)
+    attempt_count: int = Field(ge=0)
+    provider_request_id: str | None = None
+    unknown_remote_completion: bool = False
+    cancellation_requested: bool = False
+    budget_authorized_micros: int = Field(ge=0)
+    budget_reserved_micros: int = Field(ge=0)
+    budget_charged_micros: int = Field(ge=0)
+    variants: list[dict[str, Any]] = Field(default_factory=list)
+    attempts: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+    error: ErrorOut | None = None
+
+
+class GenerationV2History(StrictModel):
+    items: list[GenerationV2Out]
+    next_cursor: str | None = None
+
+
+class GenerationV2CancelOut(StrictModel):
+    id: uuid.UUID
+    lifecycle_status: str
+    cancellation_requested: bool
+
+
+# Semantic aliases for integrations that use the shorter V2 naming.
+GenerationCreateV2 = GenerationRequestV2
+GenerationResponseV2 = GenerationV2Out
+ProductLockCreate = ProductLockRevisionCreate

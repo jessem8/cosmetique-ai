@@ -25,5 +25,6 @@ export default defineConfig({
     css: true,
     restoreMocks: true,
     clearMocks: true,
+    pool: 'threads',
   },
 })

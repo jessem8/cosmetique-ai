@@ -33,6 +33,7 @@ class ImageMetadata:
     width: int
     height: int
     sha256: str
+    exif_orientation: int = 1
 
 
 def normalize_required_text(value: str) -> str:
@@ -83,6 +84,9 @@ def inspect_image(payload: bytes, content_type: str, *, max_pixels: int) -> Imag
                     raise HTTPException(
                         status_code=400, detail="Le contenu ne correspond pas au format annoncé."
                     )
+                orientation = int(source.getexif().get(274, 1) or 1)
+                if orientation < 1 or orientation > 8:
+                    orientation = 1
                 corrected = ImageOps.exif_transpose(source)
                 width, height = corrected.size
                 if (
@@ -111,6 +115,7 @@ def inspect_image(payload: bytes, content_type: str, *, max_pixels: int) -> Imag
         width=width,
         height=height,
         sha256=hashlib.sha256(payload).hexdigest(),
+        exif_orientation=orientation,
     )
 
 
@@ -121,6 +126,10 @@ def product_out(product: Product) -> ProductOut:
         brand=product.brand,
         category=product.category,
         image_url=f"/api/v1/products/{product.id}/image",
+        source_sha256=product.original_sha256,
+        source_width=product.original_width,
+        source_height=product.original_height,
+        source_exif_orientation=product.original_exif_orientation,
         created_at=product.created_at,
     )
 
@@ -169,6 +178,7 @@ async def create_product(
         original_sha256=metadata.sha256,
         original_width=metadata.width,
         original_height=metadata.height,
+        original_exif_orientation=metadata.exif_orientation,
     )
     db.add(product)
     try:

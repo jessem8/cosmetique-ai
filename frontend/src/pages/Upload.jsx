@@ -484,6 +484,16 @@ function Upload() {
                 <strong>La campagne n’a pas été lancée.</strong>
                 <p>{submitError.message}</p>
                 <p>Vérifiez le brief ou le studio IA, puis utilisez le bouton de lancement unique ci-dessous.</p>
+                {uploadedProductRef.current?.fingerprint === productFingerprint && (
+                  <button
+                    type="button"
+                    className="button button--secondary button--small"
+                    onClick={() => submit()}
+                    disabled={submitting}
+                  >
+                    Réessayer le lancement
+                  </button>
+                )}
               </div>
             </div>
           )}

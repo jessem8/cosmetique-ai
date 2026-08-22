@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Fixture wide editorial scene</title>
+  <desc id="desc">A wide local fixture result with a preserved skincare bottle and copy-safe negative space.</desc>
+  <rect width="1600" height="900" fill="#d7e7e2"/>
+  <rect y="570" width="1600" height="330" fill="#f3f4f0"/>
+  <path d="M0 570h1600v25H0z" fill="#bfD5cf"/>
+  <path d="M0 0h380v570H0z" fill="#c4dcD6"/>
+  <ellipse cx="1120" cy="764" rx="230" ry="35" fill="#c6cfca"/>
+  <rect x="1010" y="298" width="220" height="450" rx="50" fill="#fbfcfc" stroke="#98aaa6" stroke-width="8"/>
+  <rect x="1048" y="224" width="144" height="95" rx="23" fill="#303c3b"/>
+  <rect x="1040" y="420" width="160" height="160" fill="#d6e8e3"/>
+  <path d="M1073 452h94v20h-94zM1060 491h120v14h-120zM1084 531h72v17h-72z" fill="#24483f"/>
+  <circle cx="1120" cy="627" r="25" fill="#24483f"/>
+  <path d="M1110 627h20M1120 617v20" stroke="#fbfcfc" stroke-width="4"/>
+  <path d="M240 708h460l80 75H160z" fill="#bdcfca"/>
+</svg>

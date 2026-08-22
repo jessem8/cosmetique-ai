@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1200" role="img" aria-labelledby="title desc">
+  <title id="title">Fixture scene, cool counter</title>
+  <desc id="desc">A second local fixture result with cool daylight and a preserved product.</desc>
+  <rect width="1200" height="1200" fill="#dae4ea"/>
+  <rect y="700" width="1200" height="500" fill="#eef1ef"/>
+  <path d="M0 700h1200v28H0z" fill="#bdcbd2"/>
+  <path d="M70 240h300v460H70z" fill="#c8d7df"/>
+  <path d="M70 240h300M220 240v460M70 470h300" stroke="#a6bbc6" stroke-width="5" fill="none"/>
+  <ellipse cx="650" cy="1018" rx="278" ry="42" fill="#cad0d0"/>
+  <rect x="525" y="430" width="250" height="520" rx="52" fill="#fcfdfd" stroke="#9ba9b0" stroke-width="8"/>
+  <rect x="565" y="345" width="170" height="108" rx="26" fill="#34424b"/>
+  <rect x="553" y="570" width="194" height="190" fill="#d7e5e5"/>
+  <path d="M598 607h102v22H598zM580 650h138v15H580zM610 700h78v18h-78z" fill="#264653"/>
+  <circle cx="650" cy="811" r="29" fill="#264653"/>
+  <path d="M639 811h22M650 800v22" stroke="#fcfdfd" stroke-width="5"/>
+  <path d="M920 820h140l70 60H840z" fill="#bec8cd"/>
+</svg>

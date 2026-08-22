@@ -36,6 +36,7 @@ from app.services.artifacts import (
 )
 from app.services.generation_jobs import safe_error_message
 from app.services.storage import GenerationInstall, StorageError, storage
+from app.services.worker_v2 import V2GenerationWorker
 
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ def claim_statement(now: datetime | None = None):
             or_(
                 and_(
                     Generation.status == GenerationStatus.PENDING,
+                    Generation.lifecycle_status.is_(None),
                     or_(
                         Generation.next_attempt_at.is_(None),
                         Generation.next_attempt_at <= now,
@@ -83,6 +85,7 @@ def claim_statement(now: datetime | None = None):
                 ),
                 and_(
                     Generation.status == GenerationStatus.PROCESSING,
+                    Generation.lifecycle_status.is_(None),
                     Generation.heartbeat_at.is_not(None),
                     Generation.heartbeat_at < lease_cutoff,
                     Generation.attempt_count < MAX_ATTEMPTS,
@@ -102,6 +105,7 @@ def exhausted_lease_statement(now: datetime | None = None):
         update(Generation)
         .where(
             Generation.status == GenerationStatus.PROCESSING,
+            Generation.lifecycle_status.is_(None),
             Generation.heartbeat_at.is_not(None),
             Generation.heartbeat_at < lease_cutoff,
             Generation.attempt_count >= MAX_ATTEMPTS,
@@ -212,6 +216,8 @@ class GenerationWorker:
             )
             if generation is None:
                 raise RuntimeError("Job introuvable.")
+            if getattr(generation, "lifecycle_status", None) is not None:
+                raise RuntimeError("Job V2 réservé au worker V2.")
             db.expunge(generation)
             db.expunge(generation.product)
             return generation
@@ -451,7 +457,7 @@ class GenerationWorker:
                 "generation_failed generation_id=%s error_type=%s error=%s",
                 generation_id,
                 type(exc).__name__,
-                str(exc)[:500],
+                getattr(exc, "error_code", "INTERNAL_ERROR"),
             )
             self._fail_or_retry(generation_id, exc)
 
@@ -470,7 +476,22 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    GenerationWorker().run_forever()
+    # Keep V1 history/downloads alive while the same durable worker process
+    # also claims and executes V2 jobs.  The V2 path owns all provider calls;
+    # the legacy path remains Colab-backed and is never used for V2 rows.
+    legacy = GenerationWorker()
+    v2 = V2GenerationWorker()
+    logger.info("combined_worker_started v1=%s v2=%s", legacy.worker_id, v2.worker_id)
+    while True:
+        v2_id = v2.claim()
+        if v2_id is not None:
+            v2.process(v2_id)
+            continue
+        v1_id = legacy.claim()
+        if v1_id is not None:
+            legacy.process(v1_id)
+            continue
+        time.sleep(min(settings.WORKER_POLL_SECONDS, settings.WORKER_REMOTE_POLL_SECONDS))
 
 
 if __name__ == "__main__":

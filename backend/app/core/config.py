@@ -50,6 +50,29 @@ class Settings(BaseSettings):
     WORKER_RETRY_DELAY_SECONDS: int = Field(default=10, ge=1, le=300)
     WORKER_JOB_DEADLINE_SECONDS: int = Field(default=1800, ge=60, le=7200)
 
+    # V2 provider profiles are opaque server-side names.  The browser may ask
+    # for a profile only; URLs and credentials remain process configuration.
+    # Colab is the legacy V1 runtime.  Keeping CloseRouter as the code-level
+    # V2 default prevents a missing environment override from silently
+    # routing a product-preserving edit into the legacy poster pipeline.
+    V2_PROVIDER_ALLOWLIST: str = "closerouter:openai:openai/gpt-image-2"
+    V2_DEFAULT_PROVIDER: str = "closerouter"
+    V2_DEFAULT_PROVIDER_PROFILE: str = "openai"
+    V2_MAX_VARIANTS: int = Field(default=8, ge=1, le=32)
+    V2_MAX_BUDGET_MICROS: int = Field(default=10_000_000, ge=0, le=10_000_000_000)
+    V2_MAX_ATTEMPTS: int = Field(default=3, ge=1, le=8)
+    V2_PROVIDER_HOST_ALLOWLIST: str = ""
+    V2_ESTIMATED_COST_PER_VARIANT_MICROS: int = Field(default=1_000_000, ge=0, le=10_000_000_000)
+    V2_SEGMENTATION_BACKEND: Literal["u2net-onnx"] = "u2net-onnx"
+    V2_SEGMENTATION_MODEL: str = "u2net"
+    V2_SEGMENTATION_MODEL_DIR: Path = Path("/app/.models")
+    V2_LOCK_MIN_SCORE: float = Field(default=0.65, ge=0, le=1)
+    V2_LOCK_MIN_MODEL_CONFIDENCE: float = Field(default=0.55, ge=0, le=1)
+    V2_MAX_PROTECTED_SKIN_FRACTION: float = Field(default=0.08, ge=0, le=1)
+    CLOSEROUTER_BASE_URL: str = "https://api.closerouter.dev/v1"
+    CLOSEROUTER_API_KEY: str = ""
+    CLOSEROUTER_TIMEOUT_SECONDS: float = Field(default=180.0, ge=10, le=900)
+
     @field_validator("CORS_ORIGINS")
     @classmethod
     def validate_cors_origins(cls, value: str) -> str:
@@ -86,9 +109,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_colab_service(self) -> "Settings":
+        # Colab is the legacy V1 runtime.  V2 uses the server-side CloseRouter
+        # adapter and must remain bootable when the temporary Colab tunnel is
+        # offline.  V1 routes fail closed at their own health check when these
+        # values are absent.
         if not self.COLAB_AI_URL:
-            if self.APP_ENV == "production":
-                raise ValueError("COLAB_AI_URL is required in production")
             return self
         parsed = urlsplit(self.COLAB_AI_URL)
         try:

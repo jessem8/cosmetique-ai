@@ -13,6 +13,8 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 
+from ai_core.schemas import GenerationManifestV2
+
 
 REQUIRED_ARCHIVE_FILES = frozenset(
     {
@@ -46,6 +48,43 @@ class ArtifactContractError(RuntimeError):
 
 class ArtifactChecksumMismatch(ArtifactContractError):
     """A member checksum or manifest checksum is invalid."""
+
+
+def read_manifest_contract(
+    payload: bytes,
+    *,
+    expected_generation_id: str | None = None,
+    expected_lock_revision_id: str | None = None,
+    expected_request_hash: str | None = None,
+) -> dict[str, Any]:
+    """Read either the legacy pipeline-1.2.0 or strict Campaign V2 manifest.
+
+    V1 callers continue to receive the original dictionary contract.  V2
+    manifests are parsed through ``ai_core`` and checked against the durable
+    generation/lock/request identities before the raw dictionary is returned
+    for storage.  No artifact URL, provider host, or credential is inferred.
+    """
+
+    value = _strict_json(payload, "manifest.json")
+    version = str(value.get("schema_version") or value.get("schema") or "")
+    if not version.startswith("2"):
+        return value
+    try:
+        manifest = GenerationManifestV2.model_validate(value)
+    except Exception as exc:
+        raise ArtifactContractError("V2 manifest does not match the strict contract") from exc
+    if expected_generation_id is not None and str(manifest.generation_id) != str(expected_generation_id):
+        raise ArtifactContractError("V2 manifest generation identity does not match")
+    if expected_lock_revision_id is not None and str(manifest.product_lock_revision_id) != str(expected_lock_revision_id):
+        raise ArtifactContractError("V2 manifest lock revision does not match")
+    if expected_request_hash is not None and manifest.request_hash != expected_request_hash:
+        raise ArtifactContractError("V2 manifest request hash does not match")
+    return manifest.model_dump(mode="json")
+
+
+# Compatibility names for callers migrating from the V1 reader.
+parse_manifest = read_manifest_contract
+read_artifact_manifest = read_manifest_contract
 
 
 @dataclass(frozen=True)

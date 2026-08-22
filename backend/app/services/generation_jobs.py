@@ -112,6 +112,11 @@ SAFE_ERROR_MESSAGES: dict[str, str] = {
     "ARTIFACT_CHECKSUM_MISMATCH": "L'intégrité des fichiers générés n'a pas pu être vérifiée.",
     "ARTIFACT_STORAGE_FAILED": "Les fichiers générés n'ont pas pu être stockés.",
     "GENERATION_STALE": "La génération a expiré avant sa finalisation.",
+    "PROVIDER_RATE_LIMITED": "Le fournisseur est temporairement saturé.",
+    "PROVIDER_BUDGET_EXCEEDED": "Le budget autorisé pour cette génération a été dépassé.",
+    "PROVIDER_COMPLETION_UNKNOWN": "La fin de la génération doit être vérifiée.",
+    "PROVIDER_PROTOCOL_ERROR": "La réponse du fournisseur est invalide.",
+    "RETRY_EXHAUSTED": "La génération a échoué après les tentatives autorisées.",
     "INTERNAL_ERROR": "Une erreur interne a interrompu la génération.",
 }
 

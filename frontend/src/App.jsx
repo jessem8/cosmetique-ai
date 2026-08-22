@@ -11,7 +11,7 @@ import Generation from './pages/Generation.jsx'
 import Login from './pages/Login.jsx'
 import Register from './pages/Register.jsx'
 import Result from './pages/Result.jsx'
-import Upload from './pages/Upload.jsx'
+import StudioWorkspace from './studio/StudioWorkspace.jsx'
 import {
   hasUsableSession,
   subscribeToSession,
@@ -125,7 +125,11 @@ function App() {
         }
       />
       <Route path="/dashboard" element={protectedRoute(<Dashboard />)} />
-      <Route path="/new" element={protectedRoute(<Upload />)} />
+      <Route path="/new" element={protectedRoute(<StudioWorkspace />)} />
+      {/* Legacy deep links are retained as redirects, not as a second product. */}
+      <Route path="/studio-v2" element={<Navigate to="/new" replace />} />
+      <Route path="/studio/v2" element={<Navigate to="/new" replace />} />
+      <Route path="/campaigns/:id/studio" element={protectedRoute(<StudioWorkspace />)} />
       <Route
         path="/generations/:id"
         element={protectedRoute(<Generation />)}

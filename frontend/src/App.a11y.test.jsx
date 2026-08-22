@@ -50,10 +50,15 @@ describe('route accessibility', () => {
 
   it('has no detectable axe violations in the campaign brief', async () => {
     authenticate()
+    server.use(
+      http.get('*/api/v1/studio/v2/provider-profiles', () => HttpResponse.json([])),
+      http.get('*/api/v1/studio/v2/engine/status', () => HttpResponse.json({ status: 'unavailable', reason: 'Test environment' })),
+      http.get('*/api/v1/studio/v2/batches', () => HttpResponse.json({ items: [] }))
+    )
     const { container } = renderApp('/new')
 
     await screen.findByRole('heading', {
-      name: /donnez au produit toute la scène/i,
+      name: /une image produit/i,
     })
     await expectNoAxeViolations(container)
   })

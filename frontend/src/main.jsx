@@ -15,6 +15,7 @@ import '@fontsource/manrope/latin-800.css'
 import '@fontsource/manrope/latin-ext-800.css'
 import App from './App.jsx'
 import './index.css'
+import './studio/atelier.css'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>

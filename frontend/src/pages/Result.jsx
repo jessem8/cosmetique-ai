@@ -42,6 +42,16 @@ const readableCopy = (platformCopy) => {
   return [platformCopy.text, hashtags].filter(Boolean).join('\n\n')
 }
 
+const artifactNames = (artifacts) => {
+  if (Array.isArray(artifacts)) {
+    return artifacts
+      .map((asset) => (typeof asset === 'string' ? asset : asset?.name))
+      .filter(Boolean)
+  }
+  if (artifacts && typeof artifacts === 'object') return Object.keys(artifacts)
+  return []
+}
+
 function useCampaignAssets(generation) {
   const [attempt, setAttempt] = useState(0)
   const [state, setState] = useState({
@@ -58,6 +68,10 @@ function useCampaignAssets(generation) {
     }))
     setAttempt((current) => current + 1)
   }, [])
+  const generationArtifactNames = useMemo(
+    () => artifactNames(generation?.artifacts),
+    [generation?.artifacts]
+  )
 
   useEffect(() => {
     if (generation?.status !== 'done') return undefined
@@ -69,9 +83,9 @@ function useCampaignAssets(generation) {
       'cutout.png',
       'mask.png',
       'background.jpg',
-      ...(generation.artifacts || [])
-        .map((asset) => asset.name)
-        .filter((name) => name.endsWith('-enhanced.jpg')),
+      ...generationArtifactNames.filter((name) =>
+        name.endsWith('-enhanced.jpg')
+      ),
     ]
 
     setState({
@@ -129,12 +143,7 @@ function useCampaignAssets(generation) {
       controller.abort()
       ownedUrls.forEach((url) => URL.revokeObjectURL(url))
     }
-  }, [
-    attempt,
-    generation?.id,
-    generation?.status,
-    generation?.artifacts?.map((asset) => asset.name).join('|'),
-  ])
+  }, [attempt, generation?.id, generation?.status, generationArtifactNames])
 
   return {
     urls: state.urls,

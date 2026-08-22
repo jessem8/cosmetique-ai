@@ -539,3 +539,117 @@ test('an expired session returns to the login route', async ({ page }) => {
   expect(storedToken).toBeNull()
   await expectNoAxeViolations(page, 'Authentification après expiration')
 })
+
+const mockStudioV2 = async (page) => {
+  let generationId = null
+  await page.route('**/api/v1/studio/v2/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const path = url.pathname
+    if (request.method() === 'GET' && path.endsWith('/provider-profiles')) {
+      return fulfillJson(route, {
+        providers: [
+          {
+            id: 'studio-safe-v1',
+            name: 'Studio Safe',
+            model: 'Product-preserve 1.4',
+            capabilities: ['mask-preservation', 'scene-generation', 'qa-provenance'],
+            costPerVariant: 0.8,
+            maxVariants: 4,
+            supportsCustomDirection: true,
+          },
+        ],
+      })
+    }
+    if (request.method() === 'POST' && path.endsWith('/product-locks')) {
+      return fulfillJson(route, { id: 'lock-e2e-1', revision: 1, status: 'needs_review' }, 201)
+    }
+    if (request.method() === 'POST' && path.endsWith('/validate')) {
+      return fulfillJson(route, { id: 'lock-e2e-1', revision: 1, status: 'validated' })
+    }
+    if (request.method() === 'POST' && path.endsWith('/refine')) {
+      return fulfillJson(route, { id: 'lock-e2e-1', revision: 2, status: 'needs_review' })
+    }
+    if (request.method() === 'POST' && path.endsWith('/reject')) {
+      return fulfillJson(route, { id: 'lock-e2e-1', revision: 2, status: 'rejected' })
+    }
+    if (request.method() === 'POST' && path.endsWith('/generations')) {
+      generationId = 'generation-e2e-v2'
+      return fulfillJson(route, { id: generationId, status: 'queued', stage: 'preparing' }, 202)
+    }
+    if (
+      request.method() === 'GET' &&
+      path.includes('/generations/') &&
+      !path.endsWith('/variants') &&
+      !path.endsWith('/export')
+    ) {
+      return fulfillJson(route, { id: generationId, status: 'done', stage: 'qa', message: 'Fixture QA complete.' })
+    }
+    if (request.method() === 'GET' && path.endsWith('/variants')) {
+      return fulfillJson(route, {
+        variants: [
+          {
+            id: 'variant-e2e-1',
+            label: 'Soft daylight',
+            image_url: '/studio/fixture-scene.svg',
+            qa: { status: 'pass', score: 0.98, failures: [] },
+            provenance: { provider: 'Studio Safe', model: 'Product-preserve 1.4', seed: 2808, cost: 0.8 },
+          },
+          {
+            id: 'variant-e2e-2',
+            label: 'Cool counter',
+            image_url: '/studio/fixture-scene-alt.svg',
+            qa: { status: 'review', score: 0.91, failures: ['Lower edge confidence below review threshold'] },
+            provenance: { provider: 'Studio Safe', model: 'Product-preserve 1.4', seed: 2809, cost: 0.8 },
+          },
+        ],
+      })
+    }
+    if (request.method() === 'POST' && path.endsWith('/cancel')) {
+      return fulfillJson(route, { id: generationId, status: 'canceled' })
+    }
+    if (request.method() === 'GET' && path.endsWith('/export')) {
+      return route.fulfill({ status: 200, contentType: 'application/zip', body: Buffer.from('validated fixture zip') })
+    }
+    return route.abort()
+  })
+}
+
+test('Campaign Studio V2 desktop flow keeps lock, generation, compare, and export truthful', async ({ page }) => {
+  await authenticate(page)
+  await mockStudioV2(page)
+  await page.goto('/studio-v2')
+  await expect(page.getByRole('heading', { name: 'Product source' })).toBeVisible()
+  await expectNoAxeViolations(page, 'Campaign Studio V2 source')
+
+  await page.getByRole('button', { name: /create product lock/i }).click()
+  await expect(page.getByRole('heading', { name: 'Tune the product boundary' })).toBeVisible()
+  await page.getByRole('button', { name: /validate lock/i }).click()
+  await expect(page.getByRole('heading', { name: 'Give the scene a point of view' })).toBeVisible()
+
+  await page.getByRole('button', { name: /^generate/i }).click()
+  await page.getByRole('button', { name: /start new generation/i }).click()
+  await expect(page.getByText('Ready for review')).toBeVisible()
+  await page.getByRole('button', { name: /^compare/i }).click()
+  await expect(page.getByRole('heading', { name: 'Review variants before delivery' })).toBeVisible()
+  await expect(page.getByText(/local fixtures are not model output/i)).toBeVisible()
+  await page.getByRole('button', { name: /^export/i }).click()
+  await expect(page.getByRole('heading', { name: 'Package the approved campaign' })).toBeVisible()
+  const download = page.waitForEvent('download')
+  await page.getByRole('button', { name: /download validated zip/i }).click()
+  await expect((await download).suggestedFilename()).toMatch(/generation-e2e-v2\.zip/)
+  await expectNoHorizontalOverflow(page)
+})
+
+test('Campaign Studio V2 mobile flow remains a bounded task sequence', async ({ page }) => {
+  await authenticate(page)
+  await mockStudioV2(page)
+  await page.goto('/studio-v2')
+  await expect(page.getByRole('button', { name: /continue/i })).toBeVisible()
+  await page.getByRole('button', { name: /create product lock/i }).click()
+  await expect(page.getByRole('heading', { name: 'Tune the product boundary' })).toBeVisible()
+  await expect(page.getByRole('button', { name: /add positive point/i })).toBeVisible()
+  await expect(page.getByRole('button', { name: /continue/i })).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+  await expectNoAxeViolations(page, 'Campaign Studio V2 mobile lock')
+})

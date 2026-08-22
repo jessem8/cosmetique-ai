@@ -9,11 +9,28 @@ x-backend-environment: &backend-environment
   MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-10}
   MAX_IMAGE_PIXELS: ${MAX_IMAGE_PIXELS:-40000000}
   ARTIFACT_ROOT: /app/artifacts
-  COLAB_AI_URL: ${COLAB_AI_URL:?COLAB_AI_URL must be set}
-  AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:?AI_SERVICE_TOKEN must be set}
+  # Legacy V1 only. V2 must not depend on a temporary Colab tunnel to boot.
+  COLAB_AI_URL: ${COLAB_AI_URL:-}
+  AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-}
   AI_CONNECT_TIMEOUT_SECONDS: ${AI_CONNECT_TIMEOUT_SECONDS:-5}
   AI_READ_TIMEOUT_SECONDS: ${AI_READ_TIMEOUT_SECONDS:-600}
   AI_HEALTH_TIMEOUT_SECONDS: ${AI_HEALTH_TIMEOUT_SECONDS:-5}
+  CLOSEROUTER_BASE_URL: ${CLOSEROUTER_BASE_URL:-https://api.closerouter.dev/v1}
+  CLOSEROUTER_API_KEY: ${CLOSEROUTER_API_KEY:-}
+  V2_PROVIDER_ALLOWLIST: ${V2_PROVIDER_ALLOWLIST:-closerouter:openai:openai/gpt-image-2}
+  V2_DEFAULT_PROVIDER: ${V2_DEFAULT_PROVIDER:-closerouter}
+  V2_DEFAULT_PROVIDER_PROFILE: ${V2_DEFAULT_PROVIDER_PROFILE:-openai}
+  V2_MAX_VARIANTS: ${V2_MAX_VARIANTS:-1}
+  V2_MAX_BUDGET_MICROS: ${V2_MAX_BUDGET_MICROS:-2000000}
+  V2_MAX_ATTEMPTS: ${V2_MAX_ATTEMPTS:-1}
+  V2_ESTIMATED_COST_PER_VARIANT_MICROS: ${V2_ESTIMATED_COST_PER_VARIANT_MICROS:-1000000}
+  V2_SEGMENTATION_BACKEND: ${V2_SEGMENTATION_BACKEND:-u2net-onnx}
+  V2_SEGMENTATION_MODEL: ${V2_SEGMENTATION_MODEL:-u2net}
+  V2_SEGMENTATION_MODEL_DIR: ${V2_SEGMENTATION_MODEL_DIR:-/app/.models}
+  V2_LOCK_MIN_SCORE: ${V2_LOCK_MIN_SCORE:-0.65}
+  V2_LOCK_MIN_MODEL_CONFIDENCE: ${V2_LOCK_MIN_MODEL_CONFIDENCE:-0.55}
+  V2_MAX_PROTECTED_SKIN_FRACTION: ${V2_MAX_PROTECTED_SKIN_FRACTION:-0.08}
+  CLOSEROUTER_TIMEOUT_SECONDS: ${CLOSEROUTER_TIMEOUT_SECONDS:-180}
   WORKER_ID: worker-1
   WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-2}
   WORKER_REMOTE_POLL_SECONDS: ${WORKER_REMOTE_POLL_SECONDS:-2.5}
@@ -60,6 +77,7 @@ services:
     environment: *backend-environment
     volumes:
       - artifacts_data:/app/artifacts
+      - segmentation_models:/app/.models
     depends_on:
       migrations:
         condition: service_completed_successfully
@@ -81,6 +99,7 @@ services:
     environment: *backend-environment
     volumes:
       - artifacts_data:/app/artifacts
+      - segmentation_models:/app/.models
     depends_on:
       migrations:
         condition: service_completed_successfully
@@ -115,8 +134,14 @@ services:
     networks: [edge]
 
 volumes:
+  # Keep the already-tested v2test data while consolidating the runtime under
+  # the normal cosmetique-ai Compose project name.
   postgres_data:
+    name: cosmetique-ai-v2test_postgres_data
   artifacts_data:
+    name: cosmetique-ai-v2test_artifacts_data
+  segmentation_models:
+    name: cosmetique-ai-v2test_segmentation_models
 
 networks:
   private:
