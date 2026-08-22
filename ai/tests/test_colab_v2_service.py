@@ -46,7 +46,7 @@ def _service() -> ColabV2Service:
         status="ready",
         engine=engine,
         health=lambda: {
-            "primary_engine": "colab-v2",
+            "primary_engine": "colab",
             "status": "ready",
             "runtime_id": "test-runtime",
         },

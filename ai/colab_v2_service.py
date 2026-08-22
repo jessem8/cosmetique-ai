@@ -145,7 +145,7 @@ def _load_grounding_dino(model: ResolvedModel, device: str) -> TransformersGroun
     processor = AutoProcessor.from_pretrained(model.path)
     loaded = AutoModelForZeroShotObjectDetection.from_pretrained(
         model.path,
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+        dtype=torch.float16 if device == "cuda" else torch.float32,
     )
     loaded.to(device).eval()
     return TransformersGroundingDINO(processor, loaded, device)
@@ -153,28 +153,38 @@ def _load_grounding_dino(model: ResolvedModel, device: str) -> TransformersGroun
 
 def _load_sam2(model: ResolvedModel, device: str) -> TransformersSAM2Predictor:
     import torch
-    from transformers import Sam2Model, Sam2Processor
+    from transformers import AutoModel, AutoProcessor
 
-    processor = Sam2Processor.from_pretrained(model.path)
-    loaded = Sam2Model.from_pretrained(
+    processor = AutoProcessor.from_pretrained(model.path)
+    loaded = AutoModel.from_pretrained(
         model.path,
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+        dtype=torch.float16 if device == "cuda" else torch.float32,
     )
     loaded.to(device).eval()
     return TransformersSAM2Predictor(processor, loaded, device)
 
 
 def _load_inpainting(model: ResolvedModel, device: str) -> DiffusersInpaintingAdapter:
+    import logging
     import torch
     from diffusers import StableDiffusionXLInpaintPipeline
 
     options: dict[str, Any] = {
-        "torch_dtype": torch.float16 if device == "cuda" else torch.float32,
+        "dtype": torch.float16 if device == "cuda" else torch.float32,
         "use_safetensors": True,
     }
     if device == "cuda":
         options["variant"] = "fp16"
-    pipeline = StableDiffusionXLInpaintPipeline.from_pretrained(model.path, **options)
+    # This checkpoint carries legacy EMA fields in its UNet config. Diffusers
+    # deliberately ignores them; keep that known metadata warning from
+    # obscuring real load failures, while restoring the logger afterwards.
+    diffusers_logger = logging.getLogger("diffusers")
+    previous_level = diffusers_logger.level
+    diffusers_logger.setLevel(logging.ERROR)
+    try:
+        pipeline = StableDiffusionXLInpaintPipeline.from_pretrained(model.path, **options)
+    finally:
+        diffusers_logger.setLevel(previous_level)
     if device == "cuda" and hasattr(pipeline, "enable_model_cpu_offload"):
         pipeline.enable_model_cpu_offload()
     else:
@@ -299,6 +309,7 @@ class ColabV2Service:
 
     def health(self) -> dict[str, Any]:
         payload = self.runtime.health()
+        payload["primary_engine"] = "colab-v2"
         payload.update(
             {
                 "service": "campaign-studio-v2-colab",
