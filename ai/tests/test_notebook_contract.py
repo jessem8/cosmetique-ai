@@ -30,3 +30,14 @@ def test_source_bootstrap_supports_an_explicit_uploaded_archive_without_force_re
     assert "zipfile.ZipFile" in source
     assert "--force" not in source
     assert "shutil.rmtree(repo_dir" not in source
+
+
+def test_install_cell_repairs_pillow_after_dependency_resolution() -> None:
+    path = Path(__file__).parents[2] / "notebook" / "pipeline_ia_cosmetique.ipynb"
+    notebook = nbformat.read(path, as_version=4)
+    install_cell = next(cell for cell in notebook.cells if cell.get("id") == "install")
+    source = "".join(install_cell["source"])
+
+    assert 'Pillow==12.1.0' in source
+    assert 'Pillow==12.3.0' not in source
+    assert source.index('Pillow==12.1.0') > source.index('rembg onnxruntime-gpu')
