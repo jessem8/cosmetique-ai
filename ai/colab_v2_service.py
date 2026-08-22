@@ -54,11 +54,15 @@ class TransformersGroundingDINO:
     def propose(self, image: Image.Image, prompt: str) -> tuple[dict[str, Any], ...]:
         import torch
 
-        inputs = self.processor(
-            images=image.convert("RGB"),
-            text=[[prompt]],
-            return_tensors="pt",
-        ).to(self.device)
+        inputs = _prepare_inputs(
+            self.processor(
+                images=image.convert("RGB"),
+                text=[[prompt]],
+                return_tensors="pt",
+            ),
+            self.model,
+            self.device,
+        )
         with torch.inference_mode():
             outputs = self.model(**inputs)
         results = self.processor.post_process_grounded_object_detection(
@@ -119,7 +123,11 @@ class TransformersSAM2Predictor:
                 [[float(x * image.width), float(y * image.height)] for x, y in points]
             ]]
             kwargs["input_labels"] = [[list(point_labels)]]
-        inputs = self.processor(image.convert("RGB"), return_tensors="pt", **kwargs).to(self.device)
+        inputs = _prepare_inputs(
+            self.processor(image.convert("RGB"), return_tensors="pt", **kwargs),
+            self.model,
+            self.device,
+        )
         with torch.inference_mode():
             outputs = self.model(**inputs, multimask_output=True)
         masks = self.processor.image_processor.post_process_masks(
@@ -136,6 +144,19 @@ def _device() -> str:
     import torch
 
     return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _prepare_inputs(inputs: Any, model: Any, device: str) -> Any:
+    """Move processor tensors and match floating inputs to model dtype."""
+    inputs = inputs.to(device)
+    try:
+        model_dtype = next(parameter for parameter in model.parameters() if parameter.is_floating_point()).dtype
+    except StopIteration:
+        return inputs
+    for name, value in inputs.items():
+        if hasattr(value, "is_floating_point") and value.is_floating_point():
+            inputs[name] = value.to(dtype=model_dtype)
+    return inputs
 
 
 def _load_grounding_dino(model: ResolvedModel, device: str) -> TransformersGroundingDINO:
