@@ -145,17 +145,10 @@ def _load_grounding_dino(model: ResolvedModel, device: str) -> TransformersGroun
     processor = AutoProcessor.from_pretrained(model.path)
     load_options: dict[str, Any] = {
         "dtype": torch.float16 if device == "cuda" else torch.float32,
+        "low_cpu_mem_usage": True,
     }
-    if device == "cuda":
-        load_options.update(
-            {
-                "device_map": "auto",
-                "max_memory": {0: os.getenv("COLAB_DETECTOR_GPU_MEMORY", "8GiB"), "cpu": "24GiB"},
-                "low_cpu_mem_usage": True,
-            }
-        )
     loaded = AutoModelForZeroShotObjectDetection.from_pretrained(model.path, **load_options)
-    loaded.eval()
+    loaded.to(device).eval()
     return TransformersGroundingDINO(processor, loaded, device)
 
 
@@ -166,17 +159,10 @@ def _load_sam2(model: ResolvedModel, device: str) -> TransformersSAM2Predictor:
     processor = AutoProcessor.from_pretrained(model.path)
     load_options: dict[str, Any] = {
         "dtype": torch.float16 if device == "cuda" else torch.float32,
+        "low_cpu_mem_usage": True,
     }
-    if device == "cuda":
-        load_options.update(
-            {
-                "device_map": "auto",
-                "max_memory": {0: os.getenv("COLAB_DETECTOR_GPU_MEMORY", "8GiB"), "cpu": "24GiB"},
-                "low_cpu_mem_usage": True,
-            }
-        )
     loaded = AutoModel.from_pretrained(model.path, **load_options)
-    loaded.eval()
+    loaded.to(device).eval()
     return TransformersSAM2Predictor(processor, loaded, device)
 
 
@@ -202,7 +188,9 @@ def _load_inpainting(model: ResolvedModel, device: str) -> DiffusersInpaintingAd
         pipeline = StableDiffusionXLInpaintPipeline.from_pretrained(model.path, **options)
     finally:
         diffusers_logger.setLevel(previous_level)
-    if device == "cuda" and hasattr(pipeline, "enable_model_cpu_offload"):
+    if device == "cuda" and hasattr(pipeline, "enable_sequential_cpu_offload"):
+        pipeline.enable_sequential_cpu_offload()
+    elif device == "cuda" and hasattr(pipeline, "enable_model_cpu_offload"):
         pipeline.enable_model_cpu_offload()
     else:
         pipeline.to(device)
@@ -217,13 +205,44 @@ def _real_factories(device: str) -> dict[str, Callable[[ResolvedModel], Any]]:
 
 
 class ColabDiffusersProvider:
-    """Provider contract for the local, non-billable Colab inpainting model."""
+    """Provider contract with lazy SDXL loading for constrained T4 RAM."""
 
     provider_name = "colab"
 
-    def __init__(self, adapter: DiffusersInpaintingAdapter, model: str) -> None:
+    def __init__(
+        self,
+        adapter: DiffusersInpaintingAdapter | None,
+        model: str,
+        *,
+        runtime: ColabRuntime | None = None,
+        adapter_factory: Callable[[], DiffusersInpaintingAdapter] | None = None,
+    ) -> None:
         self.adapter = adapter
         self.model = model
+        self.runtime = runtime
+        self.adapter_factory = adapter_factory
+
+    def _ensure_adapter(self) -> DiffusersInpaintingAdapter:
+        if self.adapter is None:
+            if self.runtime is None or self.adapter_factory is None:
+                raise RuntimeUnavailable("Colab Diffusers adapter is not configured")
+            self.runtime.suspend_detectors()
+            self.adapter = self.adapter_factory()
+        return self.adapter
+
+    def _release_adapter(self) -> None:
+        if self.runtime is None:
+            return
+        self.adapter = None
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+        self.runtime.resume_detectors()
 
     def discover(self) -> tuple[Any, ...]:
         from ai_service.contracts import ProviderCapabilities
@@ -262,53 +281,67 @@ class ColabDiffusersProvider:
     def execute(self, plan: ExecutionPlan) -> NormalizedImageResult:
         if not plan.spec.image_bytes or not plan.spec.mask_bytes:
             raise RuntimeUnavailable("source and product mask are required")
-        source = decode_image(plan.spec.image_bytes).convert("RGB")
-        raw_mask = Image.open(io.BytesIO(plan.spec.mask_bytes))
-        mask = raw_mask.getchannel("A") if raw_mask.mode in {"RGBA", "LA"} else raw_mask.convert("L")
-        # Shared V2 passes an opaque product hint; Diffusers white means edit.
-        edit_mask = ImageOps.invert(mask)
-        output = self.adapter.inpaint(
-            source,
-            edit_mask,
-            plan.spec.prompt,
-            negative_prompt=plan.spec.negative_prompt,
-            seed=plan.spec.seed,
-            width=plan.spec.width,
-            height=plan.spec.height,
-            num_inference_steps=int(os.getenv("COLAB_INPAINT_STEPS", "30")),
-            guidance_scale=float(os.getenv("COLAB_INPAINT_GUIDANCE", "7.0")),
-        ).convert("RGB")
-        payload = encode_png(output, mode="RGB")
-        return NormalizedImageResult(
-            image_bytes=payload,
-            mime_type="image/png",
-            width=output.width,
-            height=output.height,
-            sha256=sha256_bytes(payload),
-            request_id=plan.request_id,
-            provider="colab",
-            model=self.model,
-            usage={"runtime": "colab", "billable": False},
-            cost_usd=0.0,
-            deterministic_seed_claim=False,
-        )
+        try:
+            adapter = self._ensure_adapter()
+            source = decode_image(plan.spec.image_bytes).convert("RGB")
+            raw_mask = Image.open(io.BytesIO(plan.spec.mask_bytes))
+            mask = raw_mask.getchannel("A") if raw_mask.mode in {"RGBA", "LA"} else raw_mask.convert("L")
+            # Shared V2 passes an opaque product hint; Diffusers white means edit.
+            edit_mask = ImageOps.invert(mask)
+            output = adapter.inpaint(
+                source,
+                edit_mask,
+                plan.spec.prompt,
+                negative_prompt=plan.spec.negative_prompt,
+                seed=plan.spec.seed,
+                width=plan.spec.width,
+                height=plan.spec.height,
+                num_inference_steps=int(os.getenv("COLAB_INPAINT_STEPS", "30")),
+                guidance_scale=float(os.getenv("COLAB_INPAINT_GUIDANCE", "7.0")),
+            ).convert("RGB")
+            payload = encode_png(output, mode="RGB")
+            return NormalizedImageResult(
+                image_bytes=payload,
+                mime_type="image/png",
+                width=output.width,
+                height=output.height,
+                sha256=sha256_bytes(payload),
+                request_id=plan.request_id,
+                provider="colab",
+                model=self.model,
+                usage={"runtime": "colab", "billable": False},
+                cost_usd=0.0,
+                deterministic_seed_claim=False,
+            )
+        finally:
+            # Keep only one heavy model family resident at a time on a T4.
+            self._release_adapter()
 
 
 @dataclass
 class ColabSafetyDetectors:
-    engine: ColabProductLockEngine
+    runtime: ColabRuntime
+
+    def _engine(self) -> ColabProductLockEngine:
+        if self.runtime.engine is None:
+            self.runtime.resume_detectors()
+        if self.runtime.engine is None:
+            raise RuntimeUnavailable("detector engine is unavailable for QA")
+        return self.runtime.engine
 
     def has_duplicate_product(self, image: Image.Image, lock: Any) -> bool | None:
         try:
-            proposals = self.engine._proposals(image, "cosmetic product packaging")
-            return self.engine._distinct_product_count(proposals) > 1
+            engine = self._engine()
+            proposals = engine._proposals(image, "cosmetic product packaging")
+            return engine._distinct_product_count(proposals) > 1
         except Exception:
             return None
 
     def detect_person_or_hands(self, image: Image.Image) -> Mapping[str, bool] | None:
         try:
-            people = self.engine._proposals(image, "person")
-            hands = self.engine._proposals(image, "human hand")
+            engine = self._engine()
+            people = engine._proposals(image, "person")
+            hands = engine._proposals(image, "human hand")
             return {
                 "person": any(item.score >= 0.45 for item in people),
                 "hands": any(item.score >= 0.45 for item in hands),
@@ -332,6 +365,7 @@ class ColabV2Service:
                 "service": "campaign-studio-v2-colab",
                 "generation_provider": "colab-diffusers",
                 "generation_model": self.provider.model,
+                "generation_loaded": self.provider.adapter is not None,
             }
         )
         return payload
@@ -354,7 +388,7 @@ class ColabV2Service:
         lock = self.locks.get(lock_id)
         if lock is None or self.runtime.engine is None:
             raise KeyError("product lock not found")
-        detectors = ColabSafetyDetectors(self.runtime.engine)
+        detectors = ColabSafetyDetectors(self.runtime)
         outcome = BackgroundGenerationOrchestrator(self.provider).generate(
             lock,
             category=category,
@@ -420,7 +454,12 @@ def build_service(*, hf_token: str | None = None, cache_dir: str = "/content/cam
     inpaint_model = runtime.registry.resolved.get("inpaint")
     if inpaint_model is None:
         raise RuntimeUnavailable("the V2 inpainting snapshot was not resolved")
-    provider = ColabDiffusersProvider(_load_inpainting(inpaint_model, device), inpaint_model.repo_id)
+    provider = ColabDiffusersProvider(
+        None,
+        inpaint_model.repo_id,
+        runtime=runtime,
+        adapter_factory=lambda: _load_inpainting(inpaint_model, device),
+    )
     return ColabV2Service(runtime=runtime, provider=provider)
 
 

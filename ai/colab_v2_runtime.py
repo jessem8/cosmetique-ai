@@ -7,6 +7,7 @@ there is no parallel notebook implementation.
 """
 from __future__ import annotations
 
+import gc
 import hashlib
 import importlib
 import io
@@ -235,23 +236,55 @@ class ColabRuntime:
     registry: ModelRegistry
     runtime_id: str = field(default_factory=lambda: hashlib.sha256(os.urandom(32)).hexdigest()[:20])
     engine: ColabProductLockEngine | None = None
+    factories: Mapping[str, Callable[[ResolvedModel], Any]] | None = None
+    models: Mapping[str, ResolvedModel] | None = None
     status: str = "starting"
     reason: str | None = None
+
+    def _load_detectors(self) -> None:
+        if self.factories is None or self.models is None:
+            raise RuntimeUnavailable("detector factories are not configured")
+        proposal = GroundingDINOProposalAdapter(
+            detector=self.factories["grounding_dino"](self.models["grounding_dino"])
+        )
+        sam2 = SAM2Segmenter(
+            predictor=self.factories["sam2"](self.models["sam2"])
+        )
+        dfine = (
+            DFineProposalAdapter(detector=self.factories["dfine"](self.models["dfine"]))
+            if "dfine" in self.models and "dfine" in self.factories
+            else None
+        )
+        self.engine = ColabProductLockEngine(proposal=proposal, sam2=sam2, dfine=dfine)
 
     def start(self, factories: Mapping[str, Callable[[ResolvedModel], Any]], *, token: str | None = None) -> None:
         try:
             import torch
             if not torch.cuda.is_available():
                 raise RuntimeUnavailable("CUDA GPU is unavailable")
-            models = self.registry.resolve(token)
-            proposal = GroundingDINOProposalAdapter(detector=factories["grounding_dino"](models["grounding_dino"]))
-            sam2 = SAM2Segmenter(predictor=factories["sam2"](models["sam2"]))
-            dfine = DFineProposalAdapter(detector=factories["dfine"](models["dfine"])) if "dfine" in models and "dfine" in factories else None
-            self.engine = ColabProductLockEngine(proposal=proposal, sam2=sam2, dfine=dfine)
+            self.factories = factories
+            self.models = self.registry.resolve(token)
+            self._load_detectors()
             self.status, self.reason = "ready", None
         except Exception as exc:
             self.engine, self.status, self.reason = None, "unavailable", f"{type(exc).__name__}: {exc}"[:500]
             raise
+
+    def suspend_detectors(self) -> None:
+        """Release detector objects before loading the large SDXL pipeline."""
+        self.engine = None
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+
+    def resume_detectors(self) -> None:
+        if self.engine is None:
+            self._load_detectors()
+
 
     def health(self) -> dict[str, Any]:
         return {
