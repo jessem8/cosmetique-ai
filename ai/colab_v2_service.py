@@ -184,7 +184,7 @@ def _load_grounding_dino(model: ResolvedModel, device: str) -> TransformersGroun
         "low_cpu_mem_usage": True,
     }
     loaded = AutoModelForZeroShotObjectDetection.from_pretrained(model.path, **load_options)
-    loaded.to(device).eval()
+    loaded.to(device).float().eval()
     return TransformersGroundingDINO(processor, loaded, device)
 
 
@@ -200,7 +200,7 @@ def _load_sam2(model: ResolvedModel, device: str) -> TransformersSAM2Predictor:
         "low_cpu_mem_usage": True,
     }
     loaded = AutoModel.from_pretrained(model.path, **load_options)
-    loaded.to(device).eval()
+    loaded.to(device).float().eval()
     return TransformersSAM2Predictor(processor, loaded, device)
 
 
