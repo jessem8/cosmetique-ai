@@ -143,11 +143,19 @@ def _load_grounding_dino(model: ResolvedModel, device: str) -> TransformersGroun
     from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
     processor = AutoProcessor.from_pretrained(model.path)
-    loaded = AutoModelForZeroShotObjectDetection.from_pretrained(
-        model.path,
-        dtype=torch.float16 if device == "cuda" else torch.float32,
-    )
-    loaded.to(device).eval()
+    load_options: dict[str, Any] = {
+        "dtype": torch.float16 if device == "cuda" else torch.float32,
+    }
+    if device == "cuda":
+        load_options.update(
+            {
+                "device_map": "auto",
+                "max_memory": {0: os.getenv("COLAB_DETECTOR_GPU_MEMORY", "8GiB"), "cpu": "24GiB"},
+                "low_cpu_mem_usage": True,
+            }
+        )
+    loaded = AutoModelForZeroShotObjectDetection.from_pretrained(model.path, **load_options)
+    loaded.eval()
     return TransformersGroundingDINO(processor, loaded, device)
 
 
@@ -156,11 +164,19 @@ def _load_sam2(model: ResolvedModel, device: str) -> TransformersSAM2Predictor:
     from transformers import AutoModel, AutoProcessor
 
     processor = AutoProcessor.from_pretrained(model.path)
-    loaded = AutoModel.from_pretrained(
-        model.path,
-        dtype=torch.float16 if device == "cuda" else torch.float32,
-    )
-    loaded.to(device).eval()
+    load_options: dict[str, Any] = {
+        "dtype": torch.float16 if device == "cuda" else torch.float32,
+    }
+    if device == "cuda":
+        load_options.update(
+            {
+                "device_map": "auto",
+                "max_memory": {0: os.getenv("COLAB_DETECTOR_GPU_MEMORY", "8GiB"), "cpu": "24GiB"},
+                "low_cpu_mem_usage": True,
+            }
+        )
+    loaded = AutoModel.from_pretrained(model.path, **load_options)
+    loaded.eval()
     return TransformersSAM2Predictor(processor, loaded, device)
 
 
@@ -172,6 +188,7 @@ def _load_inpainting(model: ResolvedModel, device: str) -> DiffusersInpaintingAd
     options: dict[str, Any] = {
         "dtype": torch.float16 if device == "cuda" else torch.float32,
         "use_safetensors": True,
+        "low_cpu_mem_usage": True,
     }
     if device == "cuda":
         options["variant"] = "fp16"
