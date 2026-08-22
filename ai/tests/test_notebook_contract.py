@@ -17,3 +17,16 @@ def test_canonical_notebook_is_valid_and_has_no_demo_copy() -> None:
     ).casefold()
     for placeholder in ("maison exemple", "hydra glow serum", "sérum éclat"):
         assert placeholder not in source
+
+
+def test_source_bootstrap_supports_an_explicit_uploaded_archive_without_force_reset() -> None:
+    path = Path(__file__).parents[2] / "notebook" / "pipeline_ia_cosmetique.ipynb"
+    notebook = nbformat.read(path, as_version=4)
+    source_cell = next(cell for cell in notebook.cells if cell.get("id") == "source")
+    source = "".join(source_cell["source"])
+
+    assert "SOURCE_MODE" in source
+    assert "uploaded_archive" in source
+    assert "zipfile.ZipFile" in source
+    assert "--force" not in source
+    assert "shutil.rmtree(repo_dir" not in source

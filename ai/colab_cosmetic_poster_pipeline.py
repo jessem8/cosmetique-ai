@@ -1113,7 +1113,12 @@ def create_app() -> Any:
     # globals, not from ``create_app``'s local scope.  Without this binding,
     # recent Pydantic releases reject multipart uploads with an unresolved
     # ``ForwardRef('UploadFile')`` before the campaign handler can run.
-    globals()["UploadFile"] = UploadFile
+    # Endpoint return/parameter annotations are deferred strings.  FastAPI
+    # resolves them from this module's globals (not this function's locals), so
+    # bind every imported framework type used by the route signatures.  This
+    # keeps the V1 Colab app importable under current Pydantic/FastAPI while V2
+    # remains in the separate ``ai_service`` package.
+    globals().update({"UploadFile": UploadFile, "Response": Response, "Request": Request})
 
     app = FastAPI(title="Cosmetic AI Colab Service", version=PIPELINE_VERSION)
     @app.middleware("http")
