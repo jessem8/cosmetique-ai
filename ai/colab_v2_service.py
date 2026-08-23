@@ -75,7 +75,9 @@ class TransformersGroundingDINO:
         result = results[0]
         boxes = result.get("boxes", ())
         scores = result.get("scores", ())
-        labels = result.get("text_labels", result.get("labels", ()))
+        labels = result.get("text_labels")
+        if labels is None:
+            labels = result.get("labels", ())
         proposals: list[dict[str, Any]] = []
         for index, (box, score) in enumerate(zip(boxes, scores)):
             values = [float(item) for item in box.detach().cpu().tolist()]
