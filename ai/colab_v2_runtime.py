@@ -18,7 +18,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from PIL import Image
 
-from ai_service.contracts import NormalizedBox, ProductLockStatus, RefinementContract
+from ai_service.contracts import NormalizedBox, NormalizedPoint, PointLabel, ProductLockStatus, RefinementContract
 from ai_service.image import ProductLockProcessor
 from ai_service.orchestration import BackgroundGenerationOrchestrator, FailClosedQAGate, ScenePlanner
 from ai_service.product_lock import ProductLock
@@ -112,6 +112,7 @@ class ModelRegistry:
 @dataclass
 class DetectorConsensus:
     product_proposals: tuple[Proposal, ...]
+    contaminant_proposals: tuple[Proposal, ...]
     contamination: tuple[str, ...]
     selected: Proposal | None
     reasons: tuple[str, ...]
@@ -163,21 +164,81 @@ class ColabProductLockEngine:
             if all(cls._iou(proposal.box, accepted.box) < 0.65 for accepted in distinct):
                 distinct.append(proposal)
         return len(distinct)
+
     def inspect(self, image: Image.Image) -> DetectorConsensus:
         products = self._proposals(image, "cosmetic product packaging")
         selected = select_proposal(products, minimum_score=0.55, ambiguity_margin=0.08)
+        reasons: list[str] = []
+        if selected is None and products:
+            selected = max(products, key=lambda item: item.score)
+            reasons.append("ambiguous_product_proposal_maximum_effort")
+        elif selected is None:
+            reasons.append("missing_product_proposal")
+
+        contaminants: list[Proposal] = []
         contamination: list[str] = []
-        for label, prompt in (("hand_detected", "human hand"), ("person_detected", "person"), ("multiple_product_detected", "cosmetic product packaging")):
-            candidates = self._proposals(image, prompt)
-            if label == "multiple_product_detected":
-                if self._distinct_product_count(candidates) > 1:
-                    contamination.append(label)
-            elif any(item.score >= 0.45 for item in candidates):
-                contamination.append(label)
-        reasons = list(contamination)
-        if selected is None:
-            reasons.append("ambiguous_or_missing_product_proposal")
-        return DetectorConsensus(tuple(products), tuple(sorted(set(contamination))), selected, tuple(sorted(set(reasons))))
+        hands = tuple(item for item in self._proposals(image, "human hand") if item.score >= 0.45)
+        people = tuple(item for item in self._proposals(image, "person") if item.score >= 0.45)
+        if hands:
+            contaminants.extend(hands)
+            contamination.append("hand_detected")
+        if people:
+            contaminants.extend(people)
+            contamination.append("person_detected")
+
+        if selected is not None:
+            extras = tuple(
+                item
+                for item in products
+                if item.score >= 0.55
+                and item is not selected
+                and self._iou(item.box, selected.box) < 0.65
+            )
+            if extras:
+                contaminants.extend(extras)
+                contamination.append("multiple_product_detected")
+
+        reasons.extend(contamination)
+        return DetectorConsensus(
+            tuple(products),
+            tuple(contaminants),
+            tuple(sorted(set(contamination))),
+            selected,
+            tuple(sorted(set(reasons))),
+        )
+
+    @staticmethod
+    def _point(box: NormalizedBox, label: PointLabel) -> NormalizedPoint:
+        return NormalizedPoint(
+            x=min(1.0, max(0.0, box.x + box.width / 2)),
+            y=min(1.0, max(0.0, box.y + box.height / 2)),
+            label=label,
+        )
+
+    @classmethod
+    def _guided_refinement(
+        cls,
+        base: RefinementContract,
+        selected: NormalizedBox,
+        contaminants: Iterable[Proposal],
+    ) -> RefinementContract:
+        positives = list(base.positive_points)
+        negatives = list(base.negative_points)
+        if not positives:
+            positives.append(cls._point(selected, PointLabel.POSITIVE))
+        seen = {(round(point.x, 6), round(point.y, 6)) for point in negatives}
+        for proposal in contaminants:
+            point = cls._point(proposal.box, PointLabel.NEGATIVE)
+            key = (round(point.x, 6), round(point.y, 6))
+            if key not in seen:
+                negatives.append(point)
+                seen.add(key)
+        return RefinementContract(tuple(positives), tuple(negatives[:63]), base.box or selected)
+
+    @staticmethod
+    def _source_mime(source: bytes) -> str:
+        with Image.open(io.BytesIO(source)) as image:
+            return Image.MIME.get(image.format or "", "image/png")
 
     def create_lock(
         self,
@@ -187,48 +248,55 @@ class ColabProductLockEngine:
         target_box: NormalizedBox | Mapping[str, Any] | None = None,
     ) -> ProductLock:
         image = Image.open(io.BytesIO(source)).convert("RGBA")
+        source_mime = self._source_mime(source)
         consensus = self.inspect(image)
         chosen = target_box or consensus.selected
         if isinstance(chosen, Proposal):
             chosen = chosen.box
         contract = refinement if isinstance(refinement, RefinementContract) else RefinementContract.from_mapping(refinement or {})
-        if chosen is not None and contract.box is None:
-            contract = RefinementContract(contract.positive_points, contract.negative_points, chosen)
-        if chosen is None or consensus.contamination:
-            # Create a revision with explicit reasons; the UI can correct it but
-            # no scene generation is permitted until SAM2 produces acceptance.
-            lock = self.processor.create(source, mask=None, refinement=contract, target_box=chosen)
+        if chosen is None:
+            lock = self.processor.create(source, mask=None, refinement=contract, target_box=None, source_mime=source_mime)
             return replace(
                 lock,
                 status=ProductLockStatus.NEEDS_REVIEW,
-                reasons=tuple(sorted(set(lock.reasons + consensus.reasons + ("correction_required",)))),
+                reasons=tuple(sorted(set(lock.reasons + consensus.reasons + ("product_detection_failed",)))),
             )
+        contract = self._guided_refinement(contract, chosen, consensus.contaminant_proposals)
         result = self.sam2.segment(image, refinement=contract, target_box=chosen)
-        return self.processor.create(source, mask=result, refinement=contract, target_box=chosen)
+        lock = self.processor.create(
+            source,
+            mask=result,
+            refinement=contract,
+            target_box=chosen,
+            source_mime=source_mime,
+        )
+        return replace(lock, reasons=tuple(sorted(set(lock.reasons + consensus.reasons))))
 
     def refine(self, lock: ProductLock, source: bytes, refinement: RefinementContract | Mapping[str, Any]) -> ProductLock:
         contract = refinement if isinstance(refinement, RefinementContract) else RefinementContract.from_mapping(refinement)
         image = Image.open(io.BytesIO(source)).convert("RGBA")
         consensus = self.inspect(image)
         chosen = contract.box or (consensus.selected.box if consensus.selected else None)
-        if chosen is None or consensus.contamination:
+        if chosen is None:
             revised = self.processor.refine(lock, contract)
             return replace(
                 revised,
                 status=ProductLockStatus.NEEDS_REVIEW,
-                reasons=tuple(sorted(set(revised.reasons + consensus.reasons + ("correction_required",)))),
+                reasons=tuple(sorted(set(revised.reasons + consensus.reasons + ("product_detection_failed",)))),
             )
-        result = self.sam2.segment(image, refinement=contract, target_box=chosen)
-        return self.processor.create(
+        guided = self._guided_refinement(contract, chosen, consensus.contaminant_proposals)
+        result = self.sam2.segment(image, refinement=guided, target_box=chosen)
+        revised = self.processor.create(
             source,
             mask=result,
-            refinement=contract,
+            refinement=guided,
             target_box=chosen,
             lock_id=lock.lock_id,
             revision=lock.revision + 1,
             source_mime=lock.source_mime,
             source_sha256=lock.source_sha256,
         )
+        return replace(revised, reasons=tuple(sorted(set(revised.reasons + consensus.reasons))))
 
 
 @dataclass

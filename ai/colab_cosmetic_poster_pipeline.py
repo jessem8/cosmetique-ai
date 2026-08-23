@@ -614,7 +614,8 @@ def derive_art_direction(
     )
     thumbnail = cutout.convert("RGBA").copy()
     thumbnail.thumbnail((96, 96), Image.Resampling.LANCZOS)
-    pixels = [pixel[:3] for pixel in thumbnail.getdata() if pixel[3] >= 220]
+    pixel_source = thumbnail.get_flattened_data() if hasattr(thumbnail, "get_flattened_data") else thumbnail.getdata()
+    pixels = [pixel[:3] for pixel in pixel_source if pixel[3] >= 220]
     colorful = [
         pixel
         for pixel in pixels

@@ -116,6 +116,50 @@ def test_scene_planner_has_structured_negative_contract() -> None:
     assert len(plan.plan_sha256) == 64
 
 
+def _colored_source(color: tuple[int, int, int]) -> bytes:
+    image = Image.new("RGB", (64, 48), (245, 245, 245))
+    ImageDraw.Draw(image).rectangle((18, 7, 42, 40), fill=color)
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
+def test_scene_plan_is_conditioned_by_product_pixels_and_user_direction() -> None:
+    processor = ProductLockProcessor()
+    blue_lock = processor.create(_colored_source((20, 70, 190)), mask=_mask())
+    amber_lock = processor.create(_colored_source((190, 105, 30)), mask=_mask())
+    provider = DeterministicImageProvider()
+
+    blue = BackgroundGenerationOrchestrator(provider).generate(
+        blue_lock,
+        category="cosmetics",
+        seed=11,
+        duplicate_detector=CleanSyntheticQA(),
+        person_hand_detector=CleanSyntheticQA(),
+    )
+    amber = BackgroundGenerationOrchestrator(provider).generate(
+        amber_lock,
+        category="cosmetics",
+        seed=11,
+        duplicate_detector=CleanSyntheticQA(),
+        person_hand_detector=CleanSyntheticQA(),
+    )
+    custom = BackgroundGenerationOrchestrator(provider).generate(
+        blue_lock,
+        category="cosmetics",
+        seed=11,
+        creative_direction="Un décor marin minéral avec une lumière rasante.",
+        duplicate_detector=CleanSyntheticQA(),
+        person_hand_detector=CleanSyntheticQA(),
+    )
+
+    assert blue.scene_plan.prompt != amber.scene_plan.prompt
+    assert blue.scene_plan.plan_sha256 != amber.scene_plan.plan_sha256
+    assert blue.scene_plan.metadata["product_profile_sha256"] != amber.scene_plan.metadata["product_profile_sha256"]
+    assert "Un décor marin minéral" in custom.scene_plan.prompt
+    assert custom.scene_plan.metadata["direction_supplied"] is True
+
+
 def test_orchestration_restores_exact_product_and_fails_closed_without_detectors() -> None:
     processor = ProductLockProcessor()
     lock = processor.create(_jpeg_source(), mask=_mask())

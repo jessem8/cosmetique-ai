@@ -1,6 +1,7 @@
 """Scene planning, background generation, restoration, and fail-closed QA."""
 from __future__ import annotations
 
+import colorsys
 import hashlib
 import io
 import math
@@ -53,6 +54,70 @@ def _normalized_category(value: str) -> str:
     return key if key in CATEGORY_SCENES else "cosmetics"
 
 
+def product_visual_profile(lock: ProductLock) -> dict[str, Any]:
+    """Derive a bounded product-specific scene profile from accepted pixels."""
+
+    _, mask, cutout = _open_lock_images(lock)
+    bbox = mask.getbbox()
+    if bbox is None:
+        raise ValueError("product lock mask has no foreground")
+    left, top, right, bottom = bbox
+    crop = cutout.crop(bbox)
+    crop.thumbnail((96, 96), Image.Resampling.LANCZOS)
+    pixel_source = crop.get_flattened_data() if hasattr(crop, "get_flattened_data") else crop.getdata()
+    pixels = [pixel[:3] for pixel in pixel_source if len(pixel) >= 4 and pixel[3] >= 128]
+    if not pixels:
+        raise ValueError("product cutout has no visible pixels")
+    dominant = tuple(round(sum(pixel[channel] for pixel in pixels) / len(pixels)) for channel in range(3))
+    red, green, blue = (value / 255 for value in dominant)
+    hue, saturation, brightness = colorsys.rgb_to_hsv(red, green, blue)
+    if saturation < 0.12:
+        color_family = "neutral"
+    elif hue < 0.05 or hue >= 0.95:
+        color_family = "red"
+    elif hue < 0.12:
+        color_family = "amber"
+    elif hue < 0.20:
+        color_family = "yellow"
+    elif hue < 0.45:
+        color_family = "green"
+    elif hue < 0.72:
+        color_family = "blue"
+    elif hue < 0.88:
+        color_family = "violet"
+    else:
+        color_family = "rose"
+    product_width = max(1, right - left)
+    product_height = max(1, bottom - top)
+    ratio = product_width / product_height
+    silhouette = "tall" if ratio < 0.72 else "wide" if ratio > 1.35 else "balanced"
+    profile = {
+        "dominant_hex": "#" + "".join(f"{value:02x}" for value in dominant),
+        "color_family": color_family,
+        "brightness": round(brightness, 3),
+        "saturation": round(saturation, 3),
+        "silhouette": silhouette,
+        "aspect_ratio": round(ratio, 3),
+        "coverage_fraction": round(lock.metrics.coverage_fraction, 4),
+        "source_sha256": lock.source_sha256,
+        "mask_sha256": lock.mask_sha256,
+    }
+    profile["product_profile_sha256"] = sha256_bytes(canonical_json(profile).encode("utf-8"))
+    return profile
+
+
+PRODUCT_PROFILE_DIRECTIONS = {
+    "neutral": "soft mineral neutrals, sculpted shadows, refined material contrast",
+    "red": "warm editorial accents, controlled dramatic light, premium lacquer details",
+    "amber": "warm stone and golden-hour reflections, restrained luxury materials",
+    "yellow": "sunlit cream and pale-stone materials, optimistic natural daylight",
+    "green": "botanical mineral textures, fresh diffused daylight, subtle natural depth",
+    "blue": "cool mineral surfaces, pale aqua depth, crisp clean daylight",
+    "violet": "muted plum and graphite accents, sophisticated directional light",
+    "rose": "soft blush stone and satin reflections, polished beauty-editorial lighting",
+}
+
+
 def _provider_canvas_size(width: int, height: int, provider: Provider) -> tuple[int, int]:
     """Use catalog-safe image sizes for remote image-edit APIs.
 
@@ -82,15 +147,28 @@ class ScenePlanner:
         height: int = 1024,
         seed: int | None = None,
         creative_direction: str | None = None,
+        product_profile: Mapping[str, Any] | None = None,
         provider_capabilities: Any = None,
         model: str | None = None,
     ) -> ScenePlan:
         normalized = _normalized_category(category)
         style = CATEGORY_SCENES[normalized]
-        direction = f" Additional direction: {creative_direction.strip()}." if creative_direction and creative_direction.strip() else ""
+        profile = dict(product_profile or {})
+        profile_direction = PRODUCT_PROFILE_DIRECTIONS.get(str(profile.get("color_family", "neutral")), PRODUCT_PROFILE_DIRECTIONS["neutral"])
+        product_clause = (
+            " Product-conditioned art direction: "
+            f"dominant palette {profile.get('dominant_hex', '#dfe5e4')}, "
+            f"{profile.get('color_family', 'neutral')} color family, "
+            f"{profile.get('silhouette', 'balanced')} product silhouette, {profile_direction}."
+        )
+        direction = (
+            f" User creative direction, subordinate to product preservation: {creative_direction.strip()}."
+            if creative_direction and creative_direction.strip()
+            else ""
+        )
         prompt = (
-            f"Photorealistic premium cosmetic advertising environment. {style}.{direction} "
-            "Generate only the environment around a protected product; leave the product region suitable for local restoration. "
+            f"Photorealistic premium cosmetic advertising environment. {style}.{product_clause}{direction} "
+            "Generate only the environment around a protected product; leave the product region suitable for exact local restoration. "
             "Use physically plausible contact shadows and commercial lighting. Do not render advertising copy."
         )
         deterministic = bool(getattr(provider_capabilities, "deterministic_seed", False))
@@ -104,7 +182,14 @@ class ScenePlanner:
             seed=seed,
             provider_model=selected_model,
             remote_seed_deterministic=deterministic,
-            metadata={"source": "structured-scene-planner-v2", "direction_supplied": bool(creative_direction)},
+            metadata={
+                "source": "product-conditioned-scene-planner-v3",
+                "direction_supplied": bool(creative_direction and creative_direction.strip()),
+                "product_profile_sha256": profile.get("product_profile_sha256"),
+                "dominant_hex": profile.get("dominant_hex"),
+                "color_family": profile.get("color_family"),
+                "silhouette": profile.get("silhouette"),
+            },
         )
 
 
@@ -401,13 +486,21 @@ class BackgroundGenerationOrchestrator:
         if variants < 1 or variants > 16:
             raise ValueError("variants must be between 1 and 16")
         source, _, _ = _open_lock_images(lock)
+        profile = product_visual_profile(lock)
         output_width = width or source.width
         output_height = height or source.height
         output_width, output_height = _provider_canvas_size(output_width, output_height, self.provider)
         # Capabilities are discovered by plan() and are not assumed to be
         # deterministic.  The scene plan is updated per variant below only in
         # its seed/capability metadata; no remote seed claim is synthesized.
-        first_plan = self.planner.plan(category, width=output_width, height=output_height, seed=seed, creative_direction=creative_direction)
+        first_plan = self.planner.plan(
+            category,
+            width=output_width,
+            height=output_height,
+            seed=seed,
+            creative_direction=creative_direction,
+            product_profile=profile,
+        )
         outputs: list[GeneratedVariant] = []
         for index in range(variants):
             variant_seed = None if seed is None else (int(seed) + index) & 0xFFFFFFFF
@@ -473,6 +566,8 @@ class BackgroundGenerationOrchestrator:
                     "cutout_sha256": lock.cutout_sha256,
                     "provenance_sha256": lock.provenance_sha256,
                     "scene_plan_sha256": first_plan.plan_sha256,
+                    "product_profile_sha256": profile["product_profile_sha256"],
+                    "resolved_prompt": first_plan.prompt,
                 },
                 usage=result.usage,
                 attempts=result.attempts,
@@ -485,6 +580,7 @@ class BackgroundGenerationOrchestrator:
             height=output_height,
             seed=seed,
             creative_direction=creative_direction,
+            product_profile=profile,
             provider_capabilities=getattr(self.provider, "capability", None),
             model=getattr(capability, "model", None) if capability else None,
         )
@@ -507,7 +603,9 @@ __all__ = [
     "NEGATIVE_SCENE_PROMPT",
     "PersonHandDetector",
     "PersonHandQA",
+    "PRODUCT_PROFILE_DIRECTIONS",
     "ScenePlanner",
+    "product_visual_profile",
     "compare_interior_pixels",
     "record_product_transform",
     "restore_original_pixels",
