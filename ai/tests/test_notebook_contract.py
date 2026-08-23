@@ -71,5 +71,10 @@ def test_notebook_reinstalls_and_probes_transformers_before_runtime_start() -> N
         "from transformers.generation import GenerationMixin",
         "AutoModelForZeroShotObjectDetection",
         "sys.executable, '-c', dependency_probe",
+        "probe_result = subprocess.run(",
+        "capture_output=True",
+        "probe_result.stdout",
+        "probe_result.stderr",
+        "Transformers dependency preflight failed",
     ):
         assert required in source
