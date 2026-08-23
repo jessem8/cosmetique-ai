@@ -59,3 +59,17 @@ def test_colab_lock_excludes_historical_v1_inference_dependencies() -> None:
         assert legacy not in lock
     for required in ("diffusers==", "transformers==", "huggingface_hub==", "fastapi=="):
         assert required in lock
+
+
+def test_notebook_reinstalls_and_probes_transformers_before_runtime_start() -> None:
+    source = _code_source()
+
+    for required in (
+        "--no-cache-dir",
+        "--force-reinstall",
+        "dependency_probe",
+        "from transformers.generation import GenerationMixin",
+        "AutoModelForZeroShotObjectDetection",
+        "sys.executable, '-c', dependency_probe",
+    ):
+        assert required in source
