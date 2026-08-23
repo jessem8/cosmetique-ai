@@ -38,6 +38,10 @@ def test_canonical_notebook_is_valid_and_v2_only() -> None:
         "codex/campaign-studio-upgrade-checkpoint",
         "COLAB_AI_TOKEN",
         "/v2/health",
+        "ipywidgets",
+        "Textarea",
+        "creative_direction=direction",
+        "Générer le décor",
     ):
         assert required in source
 
