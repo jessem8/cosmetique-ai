@@ -1,5 +1,43 @@
 # API contract
 
+## Current supported extraction API
+
+The current `/new` workspace uses the authenticated API below. Product Lock
+creation and refinement are the only supported AI workflow. The browser never
+receives the private AI runtime URL or bearer token.
+
+```text
+POST /api/v1/auth/register
+POST /api/v1/auth/login
+POST /api/v1/products
+GET  /api/v1/products/{product_id}
+GET  /api/v1/products/{product_id}/image
+
+GET  /api/v1/studio/v2/engine/status
+GET  /api/v1/studio/v2/provider-profiles
+POST /api/v1/studio/v2/product-locks
+GET  /api/v1/studio/v2/product-locks?product_id=&limit=
+GET  /api/v1/studio/v2/product-locks/{revision_id}
+GET  /api/v1/studio/v2/product-locks/{revision_id}/artifacts/mask.png
+GET  /api/v1/studio/v2/product-locks/{revision_id}/artifacts/cutout.png
+POST /api/v1/studio/v2/product-locks/{revision_id}/refine
+POST /api/v1/studio/v2/product-locks/{revision_id}/validate
+POST /api/v1/studio/v2/product-locks/{revision_id}/reject
+```
+
+The `provider-profiles` response exposes the server-owned
+`product-extraction/native-sam2` profile. The engine-status response reports
+the actual `native-sam2` or `cpu-u2net` mode and runtime phases. A healthy
+status response is not visual mask acceptance; inspect the returned mask and
+cutout.
+
+Generation endpoints remain present for compatibility with older clients,
+but the active provider advertises `supports_scene_generation=false` and a
+generation request fails closed with `BACKGROUND_GENERATION_DISABLED`. There
+is no current background, SDXL, CloseRouter, or external image-provider call.
+
+## Historical compatibility API
+
 The browser uses the same-origin website API under `/api/v1`. It never calls
 the Colab URL directly.
 

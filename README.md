@@ -11,6 +11,7 @@ This branch delivers one supported workflow: upload a product photo, create a re
 - `ai_service/` — image, mask, cutout, provenance, and storage contracts
 - `docker/docker-compose.yml` — CUDA runtime for capable NVIDIA GPUs
 - `docker/docker-compose.cpu.yml` — CPU-only runtime override for MX350/Pascal-class or CPU-only machines
+- `docs/BACKGROUND_GENERATION_PLAN.md` — researched, optional architecture plan for the next phase
 
 The older generation/Colab modules remain only as repository compatibility material. They are not imported by the active frontend or the extraction runtime.
 
@@ -31,6 +32,34 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml -f docker/doc
 The CPU override uses ONNX Runtime with U2Net and explicitly resets the base NVIDIA reservation. It does not load the native SAM2/Grounding DINO stack; U2Net initializes in the background so the API binds immediately.
 
 The GPU runtime is adaptive in `GPU_RUNTIME_MODE=auto`: it uses the native image-only detector/segmenter when the installed CUDA stack can execute it, otherwise it reports the reason and uses the CPU extraction engine. No generation model is loaded on this path.
+
+## Optional background-generation integration
+
+The recommended continuation architecture is deliberately separate from the
+accepted extraction path:
+
+```text
+accepted Product Lock cutout + mask
+        │
+        ├── text-only scene prompt → operator's ComfyUI API-format workflow
+        │                             → background scene plate
+        │
+        └── local deterministic compositor → final PNG + hash manifest
+                                                        │
+                                                        └─ QA
+```
+
+The next phase can use the documented ComfyUI `/prompt`,
+`/history/{prompt_id}`, and `/view` contract to create a text-only scene
+plate, then place the immutable cutout last in a local compositor. That work
+is intentionally not implemented here: the next owner chooses the workflow,
+model, provider configuration, and acceptance procedure. The current
+provider allowlist remains extraction-only.
+
+Read [the background-generation plan](docs/BACKGROUND_GENERATION_PLAN.md)
+before enabling anything, then research and validate that proposal further
+before implementation. Use [the continuation runbook](docs/CONTINUATION_RUNBOOK.md)
+for the current extraction workflow and lower-GPU commands.
 
 ## Manual test
 

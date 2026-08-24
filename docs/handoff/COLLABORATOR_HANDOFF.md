@@ -1,4 +1,8 @@
-# Campaign Studio V2 Colab handoff
+# Historical Campaign Studio V2 Colab handoff
+
+> This document is retained for historical reference only. It is not the
+> current runbook and is not required for the accepted extraction platform.
+> Use `docs/CONTINUATION_RUNBOOK.md` for the current Docker workflow.
 
 This is the V2 runbook. Do not use the historical V1 poster notebook or its `/health`, `/generate-campaign`, `/generate-text`, Ollama, rembg, or PaddleOCR instructions.
 

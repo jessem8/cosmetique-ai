@@ -1,8 +1,27 @@
-# Cosmetique AI V2 operations
+# Cosmetique AI operations
 
-The active Colab integration is Campaign Studio V2. The historical V1 poster service is not an accepted runtime for the new Studio.
+The accepted local operation is the Docker product-extraction stack. The
+current provider is native Grounding DINO + SAM2 when the GPU probe passes,
+with the explicit CPU U2Net override for MX350/Pascal-class or CPU-only
+machines. Background generation is disabled.
 
-## Colab
+```powershell
+# NVIDIA-capable machine
+docker compose --env-file docker/.env -f docker/docker-compose.yml up -d --build
+
+# MX350/Pascal-class or CPU-only machine
+docker compose --env-file docker/.env -f docker/docker-compose.yml -f docker/docker-compose.cpu.yml up -d --build
+```
+
+Confirm `backend`, `worker`, `db`, and `frontend` are healthy. `migrations` is
+a one-shot successful job and exits after `alembic upgrade head`; it should not
+be expected to remain running. Follow `docs/CONTINUATION_RUNBOOK.md` for the
+manual extraction test.
+
+The remaining Colab instructions in this file are historical compatibility
+material and are not required to run the current project.
+
+## Historical Colab reference
 
 Open `notebook/pipeline_ia_cosmetique.ipynb`, select a T4 GPU, add the V2 Colab Secrets, and run the cells in order. The final cell starts an authenticated temporary ngrok tunnel for the `/v2/*` API. A healthy response must contain `primary_engine: colab-v2`, `status: ready`, a runtime ID, and resolved model revisions.
 

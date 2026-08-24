@@ -1,8 +1,8 @@
 # Product extraction platform — current handoff
 
-**Checkout:** `C:\gf_ai_task\handoff\remote_update_clone`  
-**Branch:** `codex/permanent-gpu-platform`  
-**Scope:** extraction only; no background generation, SDXL, or CloseRouter execution  
+**Checkout:** `C:\gf_ai_task\handoff\remote_update_clone`
+**Remote branch:** `main`
+**Scope:** extraction only; no background generation, SDXL, or CloseRouter execution
 **Secrets:** local `docker/.env` is not committed
 
 ## Delivered workflow
@@ -27,6 +27,15 @@
 - The engine-status API reports `native-sam2`, `cpu-u2net`, or an unavailable state so the frontend does not present a false ready state.
 - The UI reports the job phase separately from engine readiness, caps brush corrections below the runtime contract, supports cancel/save, and exposes recalculation errors as correction errors rather than generation errors.
 
+## Optional continuation architecture
+
+The repository contains a researched ComfyUI scene-plate and local-composite
+plan in `docs/BACKGROUND_GENERATION_PLAN.md`; it is intentionally not
+implemented or registered as a provider. The current accepted workflow
+remains extraction-only. When the next phase is started, it should generate a
+text-only scene plate and then composite the Product Lock cutout locally; the
+generator must not repaint the product.
+
 ## Manual acceptance
 
 Start the stack with one of these commands:
@@ -45,4 +54,4 @@ Then open `http://localhost:5173/new`, upload a real source image, run extractio
 
 A healthy container, passing unit tests, or a returned HTTP response is not visual acceptance. The manual check must confirm that the complete product is present in the cutout and that the binary mask does not retain only a tiny marker or unrelated background.
 
-The repository’s previous failed generation artifacts are historical evidence only and are not part of this workflow.
+The repository’s previous failed generation artifacts are historical evidence only and are not part of this workflow. The canonical continuation and operator instructions are in `docs/CONTINUATION_RUNBOOK.md`.
