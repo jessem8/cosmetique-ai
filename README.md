@@ -1,6 +1,6 @@
 # Cosmetique AI — product extraction workspace
 
-This branch delivers one supported workflow: upload a product photo, create a real Product Lock, inspect the binary mask and transparent cutout, optionally mark a correction area, and validate the extraction. The active application stops after extraction evidence. Background generation and external image-provider calls are disabled.
+This branch delivers one supported workflow: upload a product photo, create a real Product Lock, inspect the binary mask and transparent cutout, optionally mark a correction area, and validate the extraction. The active application stops after extraction evidence. Background generation and external image-provider calls are disabled. Correction and save actions are explicit, cancellable, and return a new immutable revision.
 
 ## Active path
 
@@ -39,8 +39,9 @@ The GPU runtime is adaptive in `GPU_RUNTIME_MODE=auto`: it uses the native image
 3. Choose a real JPG, PNG, or WebP product image and enter its name.
 4. Select **Créer le Product Lock** / **Extraire le produit**.
 5. Inspect the source, mask overlay, transparent cutout, confidence, revision, and model provenance.
-6. If necessary, paint only the defective area and recalculate.
-7. Validate the extraction. The workflow intentionally stops there.
+6. Choose **Corriger le masque**, paint only the defective area, then either cancel the draft or choose **Enregistrer et recalculer**. The correction is capped and sent as a new Product Lock revision.
+7. Follow the live job state through recalculation and inspect the new revision.
+8. Choose **Enregistrer le produit extrait** to validate the extraction. The workflow intentionally stops there.
 
 A successful request must leave real server artifacts for the source, mask, and cutout. Startup does not scan or decode every historical artifact, and high-resolution topology checks use a bounded analysis copy while the persisted mask/cutout remain full resolution. A healthy container alone is not a claim that the segmentation is visually correct.
 

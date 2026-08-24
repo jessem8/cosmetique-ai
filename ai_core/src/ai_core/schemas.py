@@ -272,8 +272,8 @@ class ProductLockRevisionCreate(StrictModel):
     # deliberately separate from ``mask_polygon``: points are guidance for an
     # installed segmentation adapter (or its explicit CPU fallback), never a
     # browser-supplied mask or an assertion that a model ran.
-    positive_points: list[NormalizedPoint] = Field(default_factory=list, max_length=128)
-    negative_points: list[NormalizedPoint] = Field(default_factory=list, max_length=128)
+    positive_points: list[NormalizedPoint] = Field(default_factory=list, max_length=64)
+    negative_points: list[NormalizedPoint] = Field(default_factory=list, max_length=64)
     prompts: ProductLockPrompts = Field(default_factory=ProductLockPrompts)
     scene: SceneSpec | None = None
 
@@ -286,6 +286,8 @@ class ProductLockRevisionCreate(StrictModel):
     def one_target_alias(self) -> "ProductLockRevisionCreate":
         if self.target_box is not None and self.target_hint is not None:
             raise ValueError("provide only one target box")
+        if len(self.positive_points) + len(self.negative_points) > 64:
+            raise ValueError("provide at most 64 correction points")
         return self
 
     @property

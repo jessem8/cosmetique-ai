@@ -38,10 +38,13 @@ const emptyLock = {
   confidence: null,
 }
 
+const MAX_CORRECTION_POINTS = 48
+
 const errorText = (error) => {
   if (error?.status === 429) return 'Le runtime GPU est temporairement limité. Aucun détourage incomplet n’a été accepté.'
   if (error?.status === 404) return 'Cette fonction n’est pas disponible sur le serveur.'
   if (error?.status >= 500) return 'Le runtime GPU n’a pas produit de détourage exploitable.'
+  if (error?.code === 'INVALID_GENERATION_REQUEST') return 'La correction du masque a été rejetée. Réduisez la zone marquée puis réessayez.'
   return error?.message || 'L’extraction n’a pas pu aboutir.'
 }
 
@@ -97,6 +100,7 @@ export default function StudioWorkspace() {
   const [preview, setPreview] = useState('')
   const [maskVisible, setMaskVisible] = useState(true)
   const [busy, setBusy] = useState(false)
+  const [jobStatus, setJobStatus] = useState(null)
   const [notice, setNotice] = useState('')
   const previewRef = useRef('')
   const submissionRef = useRef(false)
@@ -170,6 +174,7 @@ export default function StudioWorkspace() {
       sourceSha256: null,
     }))
     setLock(emptyLock)
+    setJobStatus(null)
     setStep('source')
     setNotice('Photo chargée. Lancez l’extraction pour créer le masque réel.')
   }
@@ -181,6 +186,7 @@ export default function StudioWorkspace() {
     setPreview('')
     setSource(emptySource)
     setLock(emptyLock)
+    setJobStatus(null)
     setStep('source')
     setNotice('Photo retirée.')
   }
@@ -202,6 +208,12 @@ export default function StudioWorkspace() {
 
     submissionRef.current = true
     setBusy(true)
+    setJobStatus({
+      phase: 'uploading',
+      label: 'Préparation de la source',
+      detail: 'La photo est envoyée au stockage privé avant le calcul du masque.',
+      progress: null,
+    })
     try {
       let stored = source
       if (!stored.productId) {
@@ -216,6 +228,12 @@ export default function StudioWorkspace() {
         form.set('category', source.category)
         if (source.brand.trim()) form.set('brand', source.brand.trim())
         const response = await products.create(form)
+        setJobStatus({
+          phase: 'queued',
+          label: 'Source enregistrée',
+          detail: 'Le runtime CPU prépare maintenant l’extraction du produit.',
+          progress: null,
+        })
         const raw = responseData(response)
         stored = {
           ...source,
@@ -231,6 +249,12 @@ export default function StudioWorkspace() {
         setSource(stored)
       }
 
+      setJobStatus({
+        phase: 'extracting',
+        label: 'Extraction du produit',
+        detail: 'U2Net calcule le masque, vérifie sa cohérence et prépare le détourage.',
+        progress: null,
+      })
       const response = await studioV2.productLocks.create({
         product_id: stored.productId,
         positive_points: lock.points
@@ -247,10 +271,22 @@ export default function StudioWorkspace() {
       })
       setLock(nextLock)
       setStep('lock')
+      setJobStatus({
+        phase: 'review',
+        label: 'Extraction terminée',
+        detail: 'Le masque et le détourage sont prêts pour votre vérification.',
+        progress: 100,
+      })
       setNotice('Extraction terminée. Vérifiez le masque et le détourage transparent.')
     } catch (error) {
       setLock(emptyLock)
       setStep('source')
+      setJobStatus({
+        phase: 'error',
+        label: 'Extraction interrompue',
+        detail: errorText(error),
+        progress: 0,
+      })
       setNotice(errorText(error))
     } finally {
       submissionRef.current = false
@@ -259,25 +295,51 @@ export default function StudioWorkspace() {
   }
 
   const saveCorrections = async () => {
-    if (!lock.id) return createLock()
+    if (!lock.id) return false
     setBusy(true)
+    setJobStatus({
+      phase: 'refining',
+      label: 'Recalcul du masque',
+      detail: 'Le runtime applique la zone marquée et prépare une nouvelle révision.',
+      progress: null,
+    })
     try {
-      const response = await studioV2.productLocks.refine(lock.id, {
-        target_box: lock.bbox,
+      const correction = {
         positive_points: lock.points
           .filter((point) => point.kind === 'positive')
           .map(({ x, y }) => ({ x, y })),
         negative_points: lock.points
           .filter((point) => point.kind === 'negative')
           .map(({ x, y }) => ({ x, y })),
+      }
+      if (lock.bbox) correction.target_box = lock.bbox
+      const response = await studioV2.productLocks.refine(lock.id, correction)
+      setLock(normalizeLock(response, { ...lock, points: [] }))
+      setJobStatus({
+        phase: 'review',
+        label: 'Recalcul terminé',
+        detail: 'La nouvelle révision est prête. Vérifiez le produit avant de l’enregistrer.',
+        progress: 100,
       })
-      setLock(normalizeLock(response, lock))
-      setNotice('Une nouvelle révision est prête. Vérifiez le masque avant de la valider.')
+      setNotice('Correction enregistrée. Vérifiez la nouvelle révision avant de la valider.')
+      return true
     } catch (error) {
-      setNotice(`Les corrections n’ont pas été enregistrées. ${errorText(error)}`)
+      setJobStatus({
+        phase: 'error',
+        label: 'Recalcul interrompu',
+        detail: errorText(error),
+        progress: 0,
+      })
+      setNotice(`La correction n’a pas été enregistrée. ${errorText(error)}`)
+      return false
     } finally {
       setBusy(false)
     }
+  }
+
+  const cancelCorrections = () => {
+    setLock((current) => ({ ...current, points: [] }))
+    setNotice('Correction annulée. Le masque confirmé n’a pas été modifié.')
   }
 
   const validateLock = async () => {
@@ -290,11 +352,29 @@ export default function StudioWorkspace() {
       return
     }
     setBusy(true)
+    setJobStatus({
+      phase: 'saving',
+      label: 'Enregistrement du produit',
+      detail: 'La révision validée est enregistrée dans votre espace privé.',
+      progress: null,
+    })
     try {
       const response = await studioV2.productLocks.validate(lock.id, {})
       setLock(normalizeLock(response, { ...lock, status: 'validated' }))
+      setJobStatus({
+        phase: 'saved',
+        label: 'Produit extrait enregistré',
+        detail: 'La source, le masque et le détourage sont maintenant conservés.',
+        progress: 100,
+      })
       setNotice('Extraction validée. Le test s’arrête ici, sans génération de décor.')
     } catch (error) {
+      setJobStatus({
+        phase: 'error',
+        label: 'Enregistrement interrompu',
+        detail: errorText(error),
+        progress: 0,
+      })
       setNotice(`La validation n’a pas été enregistrée. ${errorText(error)}`)
     } finally {
       setBusy(false)
@@ -305,14 +385,20 @@ export default function StudioWorkspace() {
     const point = {
       id: `issue-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       kind: 'negative',
-      x,
-      y,
+      x: Math.round(x * 1000) / 1000,
+      y: Math.round(y * 1000) / 1000,
     }
-    setLock((current) => ({
-      ...current,
-      points: [...current.points, point],
-      status: 'needs_review',
-    }))
+    setLock((current) => {
+      if (current.points.length >= MAX_CORRECTION_POINTS) return current
+      if (current.points.some((existing) => Math.hypot(existing.x - point.x, existing.y - point.y) < 0.018)) {
+        return current
+      }
+      return {
+        ...current,
+        points: [...current.points, point],
+        status: 'needs_review',
+      }
+    })
   }
 
   const stage = step === 'lock' && lockCreated ? (
@@ -326,6 +412,7 @@ export default function StudioWorkspace() {
       busy={busy}
       onBrushPoint={addCorrectionPoint}
       onSave={saveCorrections}
+      onCancelCorrections={cancelCorrections}
       onValidate={validateLock}
       onToggleMask={() => setMaskVisible((current) => !current)}
     />
@@ -379,10 +466,34 @@ export default function StudioWorkspace() {
         </div>
       )}
 
+      {jobStatus && (
+        <section className={`atelier-job-status atelier-job-status--${jobStatus.phase}`} aria-labelledby="job-status-title" aria-live="polite">
+          <div className="atelier-job-status__copy">
+            <p className="atelier-kicker">État du job</p>
+            <h2 id="job-status-title">{jobStatus.label}</h2>
+            <p>{jobStatus.detail}</p>
+          </div>
+          <div className="atelier-job-status__progress">
+            <strong>{jobStatus.progress === null ? 'En cours' : `${jobStatus.progress}%`}</strong>
+            <div
+              className="atelier-job-status__track"
+              role="progressbar"
+              aria-label={jobStatus.label}
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow={jobStatus.progress ?? undefined}
+              aria-valuetext={jobStatus.progress === null ? 'En cours' : `${jobStatus.progress}%`}
+            >
+              <span data-indeterminate={jobStatus.progress === null} style={jobStatus.progress === null ? undefined : { width: `${jobStatus.progress}%` }} />
+            </div>
+          </div>
+        </section>
+      )}
+
       <div className="atelier__main">
         <div className="atelier__stage-column">{stage}</div>
         <aside className="atelier__aside">
-          <EngineStatus engine={engine} onRefresh={refreshEngine} />
+          <EngineStatus engine={engine} jobStatus={jobStatus} onRefresh={refreshEngine} />
         </aside>
       </div>
     </div>

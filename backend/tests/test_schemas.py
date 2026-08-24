@@ -5,7 +5,7 @@ import math
 import pytest
 from pydantic import ValidationError
 
-from app.schemas import CampaignLanguage, GenerationCreate, TargetBox
+from app.schemas import CampaignLanguage, GenerationCreate, ProductLockRevisionCreate, TargetBox
 
 
 def valid_request(**changes):
@@ -51,6 +51,14 @@ def test_generation_seed_matches_the_shared_unsigned_32_bit_contract():
     ).seed == 4_294_967_295
     with pytest.raises(ValidationError):
         GenerationCreate.model_validate(valid_request(seed=4_294_967_296))
+
+
+def test_product_lock_refinement_matches_cpu_runtime_point_budget():
+    with pytest.raises(ValidationError, match="at most 64 correction points"):
+        ProductLockRevisionCreate.model_validate({
+            "positive_points": [{"x": 0.1, "y": 0.1}] * 32,
+            "negative_points": [{"x": 0.2, "y": 0.2}] * 33,
+        })
 
 
 def test_generation_request_normalizes_bounded_text_and_language():

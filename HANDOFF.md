@@ -11,9 +11,10 @@
 2. Store the source through the backend.
 3. Run Product Lock extraction.
 4. Display the source, binary mask, transparent cutout, confidence, revision, and provenance.
-5. Allow a single negative correction brush and server-side recalculation.
-6. Validate the Product Lock only when the server has real mask and cutout artifacts.
-7. Stop. There is no generation step in the active UI or provider registry.
+5. Use the explicit correction mode to paint a contaminating hand/object, cancel drafts when needed, and save recalculation as a new immutable revision.
+6. Follow the live job status through recalculation, then choose **Enregistrer le produit extrait** only after inspection.
+7. Validate the Product Lock only when the server has real mask and cutout artifacts.
+8. Stop. There is no generation step in the active UI or provider registry.
 
 ## Runtime behavior
 
@@ -24,6 +25,7 @@
 - The active GPU image lock no longer installs or eagerly loads a background-generation model.
 - The backend provider registry exposes only `product-extraction/native-sam2`; background-generation capability is false.
 - The engine-status API reports `native-sam2`, `cpu-u2net`, or an unavailable state so the frontend does not present a false ready state.
+- The UI reports the job phase separately from engine readiness, caps brush corrections below the runtime contract, supports cancel/save, and exposes recalculation errors as correction errors rather than generation errors.
 
 ## Manual acceptance
 

@@ -60,7 +60,6 @@ async def stable_generation_validation_error(
         and (
             getattr(route, "endpoint", None) is generations.create_generation
             or request.url.path.startswith("/api/v2/")
-            or "/studio/v2/" in request.url.path
         )
     ):
         return JSONResponse(

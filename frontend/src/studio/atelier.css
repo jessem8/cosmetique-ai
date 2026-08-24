@@ -92,6 +92,17 @@
 .atelier-button--text { background: transparent; color: var(--atelier-accent-dark); padding-inline: 0.3rem; }
 .atelier-button--full { width: 100%; }
 
+.atelier-job-status { align-items: center; background: var(--atelier-surface); border: 1px solid var(--atelier-line); border-radius: 10px; display: grid; gap: 1.25rem; grid-template-columns: minmax(0, 1fr) 190px; margin-bottom: 1.25rem; padding: 1rem 1.25rem; }
+.atelier-job-status__copy h2 { font-size: 1rem; letter-spacing: -0.02em; margin-top: 0.15rem; }
+.atelier-job-status__copy > p:not(.atelier-kicker) { color: var(--atelier-muted); font-size: 0.76rem; line-height: 1.45; margin-top: 0.25rem; }
+.atelier-job-status__progress { align-items: center; display: grid; gap: 0.45rem; grid-template-columns: auto 1fr; }
+.atelier-job-status__progress strong { color: var(--atelier-accent-dark); font-size: 0.8rem; }
+.atelier-job-status__track { background: var(--atelier-soft); border: 1px solid var(--atelier-line); border-radius: 999px; height: 8px; overflow: hidden; }
+.atelier-job-status__track span { background: var(--atelier-accent); border-radius: inherit; display: block; height: 100%; transition: width 240ms ease; }
+.atelier-job-status__track span[data-indeterminate=true] { animation: atelier-job-progress 1.4s ease-in-out infinite; width: 38%; }
+.atelier-job-status--error { border-color: #e9bac1; }
+.atelier-job-status--error .atelier-job-status__track span { background: var(--atelier-error); }
+
 .atelier-extraction-loader, .atelier-inline-error, .atelier-note, .atelier-direction__guardrail, .atelier-lock__brush-note { align-items: flex-start; display: flex; font-size: 0.72rem; gap: 0.45rem; line-height: 1.45; margin-top: 0.75rem; }
 .atelier-extraction-loader { background: var(--atelier-accent-soft); border: 1px solid #e6b8cb; color: var(--atelier-accent-dark); padding: 0.75rem; }
 .atelier-extraction-loader strong, .atelier-extraction-loader span { display: block; }
@@ -105,14 +116,22 @@
 .atelier-lock__workspace { min-width: 0; }
 .atelier-lock__canvas-wrap { background: var(--atelier-ink); padding: clamp(0.7rem, 2vw, 1.5rem); }
 .atelier-lock__canvas { aspect-ratio: 1 / 1; background: #cdd5d3; cursor: crosshair; margin-inline: auto; max-height: 680px; max-width: 760px; overflow: hidden; position: relative; touch-action: none; width: 100%; }
+.atelier-lock__canvas[data-brush-enabled=false] { cursor: default; }
 .atelier-lock__image, .atelier-lock__mask { height: 100%; inset: 0; object-fit: contain; position: absolute; width: 100%; }
 .atelier-lock__mask { mix-blend-mode: screen; opacity: 0.48; pointer-events: none; }
 .atelier-lock__missing, .atelier-review__empty { align-items: center; color: var(--atelier-muted); display: flex; height: 100%; justify-content: center; }
 .atelier-lock__box { border: 2px solid #fff; box-shadow: 0 0 0 1px var(--atelier-accent); min-height: 16px; min-width: 16px; position: absolute; }
 .atelier-lock__box > span { background: var(--atelier-accent); color: #fff; font-size: 0.6rem; font-weight: 800; left: -2px; padding: 0.2rem 0.35rem; position: absolute; top: -23px; white-space: nowrap; }
-.atelier-lock__point { background: #fff; border: 2px solid var(--atelier-error); border-radius: 50%; height: 22px; position: absolute; transform: translate(-50%, -50%); width: 22px; z-index: 3; }
+.atelier-lock__point { background: rgba(171, 18, 82, 0.18); border: 2px solid var(--atelier-accent); border-radius: 50%; height: 30px; position: absolute; transform: translate(-50%, -50%); width: 30px; z-index: 3; }
 .atelier-lock__canvas-note { background: rgba(27, 32, 37, 0.78); bottom: 0.6rem; color: #fff; font-size: 0.64rem; padding: 0.25rem 0.4rem; position: absolute; right: 0.6rem; }
 .atelier-lock__brush-note { color: var(--atelier-muted); }
+.atelier-correction-card { background: var(--atelier-soft); border: 1px solid var(--atelier-line); border-radius: 8px; margin-top: 1rem; padding: 0.85rem; }
+.atelier-correction-card[data-editing=true] { border-color: #d58baa; box-shadow: inset 3px 0 0 var(--atelier-accent); }
+.atelier-correction-card__head { align-items: start; display: flex; gap: 0.75rem; justify-content: space-between; }
+.atelier-correction-card__head h3 { font-size: 0.88rem; letter-spacing: -0.01em; margin-top: 0.15rem; }
+.atelier-correction-card__head p:not(.atelier-kicker) { color: var(--atelier-muted); font-size: 0.7rem; line-height: 1.4; margin-top: 0.3rem; }
+.atelier-correction-card__count { background: var(--atelier-surface); border: 1px solid var(--atelier-line); color: var(--atelier-accent-dark); flex: 0 0 auto; font-size: 0.68rem; font-weight: 800; padding: 0.28rem 0.4rem; }
+.atelier-actions--correction { align-items: center; justify-content: flex-end; margin-top: 0.75rem; }
 .atelier-lock__rail { background: var(--atelier-bg); padding: 1rem; }
 .atelier-lock__metrics { border-bottom: 1px solid var(--atelier-line); display: grid; gap: 1rem; grid-template-columns: 1fr 1fr; padding-bottom: 0.9rem; }
 .atelier-lock__metrics strong { display: block; font-size: 1rem; margin-top: 0.18rem; }
@@ -173,6 +192,11 @@
 .atelier-engine__body h2 { font-size: 1rem; }
 .atelier-engine__body strong { display: block; font-size: 0.78rem; margin-top: 0.25rem; }
 .atelier-engine__body p { color: var(--atelier-muted); font-size: 0.7rem; line-height: 1.45; margin-top: 0.3rem; }
+.atelier-engine__job { border-left: 2px solid var(--atelier-accent); margin-top: 0.8rem; padding-left: 0.6rem; }
+.atelier-engine__job > span { color: var(--atelier-accent); display: block; font-size: 0.62rem; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; }
+.atelier-engine__job strong { font-size: 0.72rem; }
+.atelier-engine__job--error { border-left-color: var(--atelier-error); }
+.atelier-engine__job--error > span { color: var(--atelier-error); }
 .atelier-engine__body dl { border-top: 1px solid var(--atelier-line); display: grid; gap: 0.4rem; margin-top: 0.8rem; padding-top: 0.7rem; }
 .atelier-engine__body dl div { display: flex; justify-content: space-between; }
 .atelier-engine__body dt { color: var(--atelier-muted); font-size: 0.65rem; }
@@ -180,5 +204,6 @@
 .atelier-engine > .atelier-button { margin-top: 0.6rem; }
 
 @keyframes atelier-spin { to { transform: rotate(360deg); } }
+@keyframes atelier-job-progress { 0%, 100% { margin-left: 0; } 50% { margin-left: 62%; } }
 @media (max-width: 980px) { .atelier__main { grid-template-columns: 1fr; } .atelier__aside { position: static; } .atelier-lock__layout { grid-template-columns: 1fr; } }
-@media (max-width: 720px) { .atelier { padding-inline: 1rem; } .atelier__intro { align-items: start; grid-template-columns: 1fr; } .atelier__intro-actions { align-items: start; text-align: left; } .atelier-source__layout, .atelier-direction__layout, .atelier-generation__layout, .atelier-review__layout { grid-template-columns: 1fr; } .atelier-stage__header { flex-direction: column; } .atelier-actions--direction, .atelier-actions--generation { align-items: stretch; display: grid; grid-template-columns: 1fr; } .atelier-actions--direction .atelier-button, .atelier-actions--generation .atelier-button { width: 100%; } .atelier-source__figure { min-height: 240px; } .atelier-review__viewer { min-height: 280px; } }
+@media (max-width: 720px) { .atelier { padding-inline: 1rem; } .atelier-job-status { grid-template-columns: 1fr; } .atelier-job-status__progress { grid-template-columns: auto minmax(0, 1fr); } .atelier__intro { align-items: start; grid-template-columns: 1fr; } .atelier__intro-actions { align-items: start; text-align: left; } .atelier-source__layout, .atelier-direction__layout, .atelier-generation__layout, .atelier-review__layout { grid-template-columns: 1fr; } .atelier-stage__header { flex-direction: column; } .atelier-actions--direction, .atelier-actions--generation { align-items: stretch; display: grid; grid-template-columns: 1fr; } .atelier-actions--direction .atelier-button, .atelier-actions--generation .atelier-button { width: 100%; } .atelier-source__figure { min-height: 240px; } .atelier-review__viewer { min-height: 280px; } }
