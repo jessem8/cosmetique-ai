@@ -107,6 +107,7 @@ SAFE_ERROR_MESSAGES: dict[str, str] = {
     "MASK_QUALITY_FAILED": "Le détourage ne satisfait pas les critères de qualité.",
     "CLAIM_SAFETY_FAILED": "Le texte proposé ne respecte pas les faits vérifiés.",
     "INVALID_GENERATION_REQUEST": "La demande de génération est invalide.",
+    "BACKGROUND_PROMPT_REQUIRED": "Décrivez le décor avant de lancer la génération.",
     "IDEMPOTENCY_CONFLICT": "Cette action a déjà été envoyée avec des données différentes.",
     "ARTIFACT_CONTRACT_FAILED": "Les fichiers générés sont incomplets ou invalides.",
     "ARTIFACT_CHECKSUM_MISMATCH": "L'intégrité des fichiers générés n'a pas pu être vérifiée.",

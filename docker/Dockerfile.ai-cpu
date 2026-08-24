@@ -1,0 +1,35 @@
+# CPU-only product extraction runtime for low-VRAM machines.
+FROM python:3.11.9-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    MODEL_CACHE_ROOT=/models \
+    ARTIFACT_ROOT=/artifacts \
+    PORT=8000
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY ai/requirements-cpu-extraction.lock /tmp/requirements.txt
+RUN pip install --requirement /tmp/requirements.txt \
+    && rm -f /tmp/requirements.txt
+
+COPY ai_core/ /tmp/ai_core/
+RUN pip install --no-deps /tmp/ai_core/ \
+    && rm -rf /tmp/ai_core
+
+COPY ai_service/ /app/ai_service/
+COPY ai/ /app/ai/
+
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin appuser \
+    && mkdir -p /models /artifacts \
+    && chown -R appuser:appuser /app /models /artifacts
+
+USER appuser
+EXPOSE 8000
+
+ENTRYPOINT ["uvicorn", "ai.gpu_runtime:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

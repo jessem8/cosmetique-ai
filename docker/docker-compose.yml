@@ -9,28 +9,26 @@ x-backend-environment: &backend-environment
   MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-10}
   MAX_IMAGE_PIXELS: ${MAX_IMAGE_PIXELS:-40000000}
   ARTIFACT_ROOT: /app/artifacts
-  # Legacy V1 only. V2 must not depend on a temporary Colab tunnel to boot.
-  COLAB_AI_URL: ${COLAB_AI_URL:-}
-  AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-}
+  # V2 uses the private in-network GPU runtime. The bearer is shared with
+  # ai-runtime and never exposed to the browser.
+  AI_SERVICE_URL: ${AI_SERVICE_URL:-http://ai-runtime:8000}
+  AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:?AI_SERVICE_TOKEN must be set}
   AI_CONNECT_TIMEOUT_SECONDS: ${AI_CONNECT_TIMEOUT_SECONDS:-5}
   AI_READ_TIMEOUT_SECONDS: ${AI_READ_TIMEOUT_SECONDS:-600}
   AI_HEALTH_TIMEOUT_SECONDS: ${AI_HEALTH_TIMEOUT_SECONDS:-5}
-  CLOSEROUTER_BASE_URL: ${CLOSEROUTER_BASE_URL:-https://api.closerouter.dev/v1}
-  CLOSEROUTER_API_KEY: ${CLOSEROUTER_API_KEY:-}
-  V2_PROVIDER_ALLOWLIST: ${V2_PROVIDER_ALLOWLIST:-closerouter:openai:openai/gpt-image-2}
-  V2_DEFAULT_PROVIDER: ${V2_DEFAULT_PROVIDER:-closerouter}
-  V2_DEFAULT_PROVIDER_PROFILE: ${V2_DEFAULT_PROVIDER_PROFILE:-openai}
+  V2_PROVIDER_ALLOWLIST: ${V2_PROVIDER_ALLOWLIST:-product-extraction:native-sam2}
+  V2_DEFAULT_PROVIDER: ${V2_DEFAULT_PROVIDER:-product-extraction}
+  V2_DEFAULT_PROVIDER_PROFILE: ${V2_DEFAULT_PROVIDER_PROFILE:-native-sam2}
   V2_MAX_VARIANTS: ${V2_MAX_VARIANTS:-1}
-  V2_MAX_BUDGET_MICROS: ${V2_MAX_BUDGET_MICROS:-2000000}
+  V2_MAX_BUDGET_MICROS: ${V2_MAX_BUDGET_MICROS:-0}
   V2_MAX_ATTEMPTS: ${V2_MAX_ATTEMPTS:-1}
-  V2_ESTIMATED_COST_PER_VARIANT_MICROS: ${V2_ESTIMATED_COST_PER_VARIANT_MICROS:-1000000}
+  V2_ESTIMATED_COST_PER_VARIANT_MICROS: ${V2_ESTIMATED_COST_PER_VARIANT_MICROS:-0}
   V2_SEGMENTATION_BACKEND: ${V2_SEGMENTATION_BACKEND:-u2net-onnx}
   V2_SEGMENTATION_MODEL: ${V2_SEGMENTATION_MODEL:-u2net}
   V2_SEGMENTATION_MODEL_DIR: ${V2_SEGMENTATION_MODEL_DIR:-/app/.models}
   V2_LOCK_MIN_SCORE: ${V2_LOCK_MIN_SCORE:-0.65}
   V2_LOCK_MIN_MODEL_CONFIDENCE: ${V2_LOCK_MIN_MODEL_CONFIDENCE:-0.55}
   V2_MAX_PROTECTED_SKIN_FRACTION: ${V2_MAX_PROTECTED_SKIN_FRACTION:-0.08}
-  CLOSEROUTER_TIMEOUT_SECONDS: ${CLOSEROUTER_TIMEOUT_SECONDS:-180}
   WORKER_ID: worker-1
   WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-2}
   WORKER_REMOTE_POLL_SECONDS: ${WORKER_REMOTE_POLL_SECONDS:-2.5}
@@ -43,6 +41,53 @@ x-backend-build: &backend-build
   dockerfile: docker/Dockerfile.backend
 
 services:
+  ai-runtime:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.ai-runtime
+    restart: unless-stopped
+    environment:
+      # HF_TOKEN is intentionally scoped to this service; backend/worker only
+      # receive the shared internal bearer and their own provider key.
+      HF_TOKEN: ${HF_TOKEN:?HF_TOKEN must be set}
+      # Standard HTTP is substantially faster and more stable than Xet on this host.
+      HF_HUB_DISABLE_XET: "1"
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:?AI_SERVICE_TOKEN must be set}
+      MODEL_CACHE_ROOT: /models
+      ARTIFACT_ROOT: /artifacts
+      GPU_RUNTIME_MODE: ${GPU_RUNTIME_MODE:-auto}
+      # Start the API immediately; native model loading runs in the background.
+      GPU_RUNTIME_EAGER_LOAD: ${GPU_RUNTIME_EAGER_LOAD:-0}
+      GPU_RUNTIME_REQUIRED_COMPUTE: ${GPU_RUNTIME_REQUIRED_COMPUTE:-12.0}
+      V2_SEGMENTATION_MODEL_DIR: /models/segmentation
+      GPU_RUNTIME_DINO_THRESHOLD: ${GPU_RUNTIME_DINO_THRESHOLD:-0.35}
+      GPU_RUNTIME_DINO_TEXT_THRESHOLD: ${GPU_RUNTIME_DINO_TEXT_THRESHOLD:-0.25}
+    volumes:
+      - ai_models:/models
+      - ai_artifacts:/artifacts
+    gpus: all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # Container readiness is separate from inference readiness. The public
+    # healthz endpoint reports models_loading while the native stack initializes.
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - http://localhost:8000/healthz
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 10m
+    # Keep the API unexposed while allowing outbound Hugging Face snapshot downloads.
+    networks: [private, edge]
+
   db:
     image: postgres:16.4-alpine
     restart: unless-stopped
@@ -81,6 +126,8 @@ services:
     depends_on:
       migrations:
         condition: service_completed_successfully
+      ai-runtime:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD
@@ -95,7 +142,7 @@ services:
   worker:
     build: *backend-build
     restart: unless-stopped
-    command: ["python", "-m", "app.services.worker"]
+    command: ["python", "-m", "app.services.worker_v2"]
     environment: *backend-environment
     volumes:
       - artifacts_data:/app/artifacts
@@ -103,6 +150,8 @@ services:
     depends_on:
       migrations:
         condition: service_completed_successfully
+      ai-runtime:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD
@@ -142,6 +191,10 @@ volumes:
     name: cosmetique-ai-v2test_artifacts_data
   segmentation_models:
     name: cosmetique-ai-v2test_segmentation_models
+  ai_models:
+    name: cosmetique-ai-ai_models
+  ai_artifacts:
+    name: cosmetique-ai-ai_artifacts
 
 networks:
   private:

@@ -60,7 +60,7 @@ export const normalizeGeneration = (response, current = {}) => {
   const sourceStatus = raw.status || raw.lifecycle_status || current.status || 'idle'
   const status = raw.unknown_remote_completion || raw.error?.code === 'PROVIDER_COMPLETION_UNKNOWN'
     ? 'uncertain'
-    : ({ accepted: 'queued', waiting_for_provider: 'waiting_provider', processing_lock: 'preparing', planning_scene: 'preparing', generating: 'rendering', compositing: 'rendering', quality_review: 'qa', needs_review: 'qa', ready: 'done', cancelled: 'canceled' }[sourceStatus] || sourceStatus)
+    : ({ accepted: 'queued', waiting_for_provider: 'waiting_provider', processing_lock: 'preparing', planning_scene: 'preparing', generating: 'rendering', compositing: 'rendering', baseline_ready: 'rendering', enhancing: 'rendering', quality_review: 'qa', needs_review: 'qa', ready: 'done', accepted_final: 'done', cancelled: 'canceled' }[sourceStatus] || sourceStatus)
   return {
     ...current,
     ...raw,
@@ -69,6 +69,12 @@ export const normalizeGeneration = (response, current = {}) => {
     stage: raw.stage || raw.current_stage || raw.lifecycle_status || current.stage || null,
     message: raw.message || raw.status_message || current.message || '',
     error: raw.error || null,
+    backgroundPrompt: raw.backgroundPrompt || raw.background_prompt || raw.scene_prompt || current.backgroundPrompt || '',
+    baseline: raw.baseline || raw.baseline_artifact || current.baseline || null,
+    enhancement: raw.enhancement || raw.enhancement_artifact || current.enhancement || null,
+    final_candidate: raw.final_candidate || raw.finalCandidate || raw.final_artifact || current.final_candidate || null,
+    qa: raw.qa || raw.quality_assurance || current.qa || null,
+    manifest: raw.manifest || current.manifest || null,
   }
 }
 

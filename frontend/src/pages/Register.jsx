@@ -95,6 +95,7 @@ function Register() {
           <p className="eyebrow">Nouveau studio</p>
           <h1>Créer votre accès</h1>
           <p>Un compte suffit pour conserver vos briefs et vos campagnes.</p>
+          <Link className="auth-card__back" to="/">Retour à la présentation</Link>
         </div>
 
         <form className="auth-form" onSubmit={handleSubmit} noValidate>
@@ -200,7 +201,7 @@ function Register() {
             ) : null}
           </div>
 
-          <button className="button button--primary button--wide" disabled={loading}>
+          <button className="button button--primary button--wide" type="submit" disabled={loading}>
             {loading ? 'Création en cours…' : 'Créer mon compte'}
           </button>
         </form>

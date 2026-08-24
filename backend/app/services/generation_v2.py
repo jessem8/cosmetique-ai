@@ -1,6 +1,7 @@
 """Persistence and lifecycle primitives for Campaign Studio V2 jobs."""
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -72,7 +73,6 @@ def _merge_lock_defaults(
         "verified_claims",
         "cta",
         "creative_direction",
-        "scene_prompt",
     ):
         if field not in supplied:
             value = getattr(prompts, field)
@@ -84,8 +84,25 @@ def _merge_lock_defaults(
         if isinstance(target, dict):
             payload["target_box"] = target
 
-    if "scene" not in supplied and lock.scene_spec:
-        payload["scene"] = lock.scene_spec
+    # A scene from a previous lock revision is never silently reused.  The
+    # generation request must carry the current user's background direction.
+    return GenerationRequestV2.model_validate(payload)
+
+
+def _require_user_scene_prompt(body: GenerationRequestV2) -> GenerationRequestV2:
+    """Require a current user-authored scene prompt before any provider work."""
+    prompt = (body.scene_prompt or "").strip()
+    if not prompt and body.scene is not None:
+        prompt = (body.scene.scene_prompt or body.scene.prompt or "").strip()
+    if len(prompt) < 12:
+        raise HTTPException(
+            status_code=422,
+            detail="BACKGROUND_PROMPT_REQUIRED",
+        )
+    if body.scene_prompt == prompt:
+        return body
+    payload = body.model_dump(mode="json")
+    payload["scene_prompt"] = prompt
     return GenerationRequestV2.model_validate(payload)
 
 
@@ -98,6 +115,10 @@ def request_snapshot(
 ) -> dict[str, Any]:
     """Build the immutable browser->DB->worker contract snapshot."""
 
+    prompt = (request.scene_prompt or "").strip()
+    if len(prompt) < 12:
+        raise HTTPException(status_code=422, detail="BACKGROUND_PROMPT_REQUIRED")
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     return {
         "contract_version": request.contract_version,
         "product": {
@@ -121,6 +142,10 @@ def request_snapshot(
             "target_geometry": lock.target_geometry,
             "prompts": lock.prompts,
             "scene": lock.scene_spec,
+        },
+        "background_prompt": {
+            "text": prompt,
+            "sha256": prompt_hash,
         },
         # Keep all browser fields in one canonical object.  Do not trim this
         # to a provider-specific subset: this is the known contract-loss seam.
@@ -161,6 +186,7 @@ def worker_request_payload(generation: Generation) -> dict[str, Any]:
             "prompts": lock.get("prompts"),
             "scene": lock.get("scene"),
         },
+        "background_prompt": snapshot.get("background_prompt"),
         "provider": generation.provider_selection,
         "variant_count": generation.variant_count,
         "budget": {
@@ -211,6 +237,8 @@ def create_v2_generation(
         profile = require_provider_profile(body.provider)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="Profil provider non autorisé.") from exc
+    if not profile.capabilities.supports_scene_generation:
+        raise HTTPException(status_code=410, detail="BACKGROUND_GENERATION_DISABLED")
     if body.variant_count > profile.capabilities.max_variants:
         raise HTTPException(status_code=422, detail="Nombre de variantes non autorisé.")
     if body.budget.max_cost_micros > profile.capabilities.max_budget_micros:
@@ -218,7 +246,7 @@ def create_v2_generation(
     if body.budget.max_attempts > settings.V2_MAX_ATTEMPTS:
         raise HTTPException(status_code=422, detail="Nombre de tentatives non autorisé.")
 
-    request = _merge_lock_defaults(body, lock)
+    request = _require_user_scene_prompt(_merge_lock_defaults(body, lock))
     snapshot = request_snapshot(
         product=product, lock=lock, request=request, profile=profile
     )

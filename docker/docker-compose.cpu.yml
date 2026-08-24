@@ -1,0 +1,21 @@
+# Use with the base file on MX350/Pascal-class or CPU-only machines:
+# docker compose --env-file docker/.env -f docker/docker-compose.yml -f docker/docker-compose.cpu.yml up -d --build
+services:
+  ai-runtime:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.ai-cpu
+    # Compose reset tags remove the base service's NVIDIA reservation when this override is used.
+    gpus: !reset []
+    deploy: !reset {}
+    environment:
+      GPU_RUNTIME_MODE: cpu-u2net
+      # U2Net also initializes in the background so the API binds immediately.
+      GPU_RUNTIME_EAGER_LOAD: "0"
+      MODEL_CACHE_ROOT: /models
+      ARTIFACT_ROOT: /artifacts
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:?AI_SERVICE_TOKEN must be set}
+      V2_SEGMENTATION_MODEL_DIR: /models/segmentation
+    volumes:
+      - ai_models:/models
+      - ai_artifacts:/artifacts

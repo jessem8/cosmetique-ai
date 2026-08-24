@@ -16,7 +16,6 @@ from typing import Any, Mapping
 from PIL import Image, ImageChops, ImageStat
 
 from ai_service import (
-    CloseRouterAdapter,
     NormalizedBox,
     OptionalDependencyError,
     ProductLock,
@@ -207,14 +206,6 @@ def load_lock_object(product: Product, revision: ProductLockRevision) -> Product
         metrics=metrics,
         reasons=(),
         source_mime=revision.source_mime,
-    )
-
-
-def closerouter_provider() -> CloseRouterAdapter:
-    return CloseRouterAdapter(
-        base_url=settings.CLOSEROUTER_BASE_URL,
-        api_key_provider=lambda: settings.CLOSEROUTER_API_KEY or None,
-        timeout=settings.CLOSEROUTER_TIMEOUT_SECONDS,
     )
 
 

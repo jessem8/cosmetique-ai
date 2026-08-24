@@ -27,7 +27,7 @@ const expectNoAxeViolations = async (container) => {
   expect(results.violations).toEqual([])
 }
 
-describe('route accessibility', () => {
+describe('supported route accessibility', () => {
   it('has no detectable axe violations on authentication', async () => {
     const { container } = renderApp('/login')
 
@@ -35,159 +35,47 @@ describe('route accessibility', () => {
     await expectNoAxeViolations(container)
   })
 
-  it('has no detectable axe violations in the empty campaign library', async () => {
-    authenticate()
-    server.use(
-      http.get('*/api/v1/generations', () =>
-        HttpResponse.json({ items: [], next_cursor: null })
-      )
-    )
-    const { container } = renderApp('/dashboard')
+  it('has no detectable axe violations on the public extraction landing', async () => {
+    const { container } = renderApp('/')
 
-    await screen.findByRole('heading', { name: /votre première campagne/i })
+    await screen.findByRole('heading', { name: /le produit reste vrai/i })
     await expectNoAxeViolations(container)
   })
 
-  it('has no detectable axe violations in the campaign brief', async () => {
+  it('has no detectable axe violations in the extraction dashboard', async () => {
+    authenticate()
+    const { container } = renderApp('/dashboard')
+
+    await screen.findByRole('heading', { name: 'Extractions' })
+    await expectNoAxeViolations(container)
+  })
+
+  it('has no detectable axe violations in the extraction workspace', async () => {
     authenticate()
     server.use(
-      http.get('*/api/v1/studio/v2/provider-profiles', () => HttpResponse.json([])),
-      http.get('*/api/v1/studio/v2/engine/status', () => HttpResponse.json({ status: 'unavailable', reason: 'Test environment' })),
-      http.get('*/api/v1/studio/v2/batches', () => HttpResponse.json({ items: [] }))
+      http.get(
+        '*/api/v1/studio/v2/engine/status',
+        () =>
+          HttpResponse.json({
+            status: 'ready',
+            ready: true,
+            gpu: 'CPU U2Net',
+            engine_mode: 'cpu-u2net',
+            models: ['U2Net ONNX (CPU)'],
+          })
+      )
     )
     const { container } = renderApp('/new')
 
-    await screen.findByRole('heading', {
-      name: /une image produit/i,
-    })
+    await screen.findByRole('heading', { name: /produit, isolé proprement/i })
     await expectNoAxeViolations(container)
   })
 
-  it('has no detectable axe violations in candidate selection', async () => {
+  it('has no detectable axe violations on the authenticated not-found route', async () => {
     authenticate()
-    server.use(
-      http.get('*/api/v1/generations/generation-1', () =>
-        HttpResponse.json({
-          id: 'generation-1',
-          product_id: 'product-1',
-          product: {
-            name: 'Sérum perle',
-            brand: 'Maison Lune',
-            category: 'soin_visage',
-          },
-          status: 'error',
-          stage: 'analysis',
-          completed_stages: [],
-          language: 'fr',
-          seed: 42,
-          error: {
-            code: 'TARGET_AMBIGUOUS',
-            message: 'Plusieurs produits possibles ont été détectés.',
-          },
-          ambiguity: {
-            original_url: '/api/v1/products/product-1/image',
-            candidates: [
-              {
-                id: 'candidate-1',
-                score: 0.91,
-                type: 'box',
-                x: 0.08,
-                y: 0.12,
-                width: 0.35,
-                height: 0.72,
-              },
-              {
-                id: 'candidate-2',
-                score: 0.86,
-                type: 'box',
-                x: 0.55,
-                y: 0.18,
-                width: 0.32,
-                height: 0.65,
-              },
-            ],
-          },
-        })
-      ),
-      http.get('*/api/v1/products/product-1/image', () =>
-        new HttpResponse(new Uint8Array([1]), {
-          headers: { 'Content-Type': 'image/jpeg' },
-        })
-      )
-    )
-    const { container } = renderApp('/generations/generation-1')
+    const { container } = renderApp('/lien-introuvable')
 
-    await screen.findByRole('radiogroup', { name: /produits détectés/i })
-    await expectNoAxeViolations(container)
-  })
-
-  it('has no detectable axe violations in a completed result', async () => {
-    authenticate()
-    server.use(
-      http.get('*/api/v1/generations/generation-1', () =>
-        HttpResponse.json({
-          id: 'generation-1',
-          product_id: 'product-1',
-          product: {
-            name: 'Sérum perle',
-            brand: 'Maison Lune',
-            category: 'soin_visage',
-          },
-          status: 'done',
-          stage: 'packaging',
-          completed_stages: [
-            'analysis',
-            'extraction',
-            'art_direction',
-            'background',
-            'composition',
-            'copy',
-            'export',
-            'packaging',
-          ],
-          language: 'fr',
-          seed: 42,
-          copy: {
-            language: 'fr',
-            instagram: {
-              text: 'Hydrate la peau.',
-              hashtags: ['#SoinVisage'],
-              claims: [
-                {
-                  evidence_id: 'benefit-1',
-                  rendered_text: 'Hydrate la peau.',
-                },
-              ],
-            },
-            facebook: {
-              text: 'Hydrate la peau.',
-              hashtags: [],
-              claims: [],
-            },
-            linkedin: {
-              text: 'Hydrate la peau.',
-              hashtags: [],
-              claims: [],
-            },
-          },
-          artifacts: [],
-        })
-      ),
-      http.get('*/api/v1/products/product-1/image', () =>
-        new HttpResponse(new Uint8Array([1]), {
-          headers: { 'Content-Type': 'image/jpeg' },
-        })
-      ),
-      http.get('*/api/v1/generations/generation-1/artifacts/*', () =>
-        new HttpResponse(new Uint8Array([2]), {
-          headers: { 'Content-Type': 'image/png' },
-        })
-      )
-    )
-    const { container } = renderApp('/result/generation-1')
-
-    await screen.findByRole('tab', { name: 'Instagram' })
-    await screen.findByRole('img', { name: /visuel instagram/i })
+    await screen.findByRole('heading', { name: /page introuvable/i })
     await expectNoAxeViolations(container)
   })
 })

@@ -1,10 +1,8 @@
-import { http, HttpResponse } from 'msw'
 import { render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it } from 'vitest'
 import App from './App.jsx'
 import { setSession } from './auth/session.js'
-import { server } from './test/server.js'
 import { TEST_TOKEN } from './test/token.js'
 
 describe('application shell', () => {
@@ -24,12 +22,6 @@ describe('application shell', () => {
 
   it('provides French navigation, a skip link, and a main landmark', async () => {
     setSession({ token: TEST_TOKEN, email: 'studio@example.com' })
-    server.use(
-      http.get('*/api/v1/generations', () =>
-        HttpResponse.json({ items: [], next_cursor: null })
-      )
-    )
-
     render(
       <MemoryRouter initialEntries={['/dashboard']}>
         <App />
@@ -45,7 +37,7 @@ describe('application shell', () => {
       '#main-content'
     )
     expect(screen.getByRole('main')).toHaveAttribute('id', 'main-content')
-    expect(screen.getByRole('link', { name: 'Campagnes' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Extractions' })).toBeInTheDocument()
     expect(
       within(navigation)
         .getAllByRole('link')

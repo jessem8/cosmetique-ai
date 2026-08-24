@@ -178,34 +178,64 @@ def _hole_fraction(mask: Image.Image, foreground: set[tuple[int, int]]) -> float
 
 
 def mask_metrics(mask: Image.Image, *, target_box: NormalizedBox | None = None, points: RefinementContract | None = None) -> MaskMetrics:
+    """Compute lock metrics without turning a phone-sized mask into Python sets.
+
+    Coverage and the outer bounding box stay exact at source resolution. The
+    topology checks use a bounded analysis copy for very large images, which
+    keeps CPU extraction responsive without changing the persisted mask/cutout.
+    """
+
     mask = mask.convert("L").point(lambda value: 255 if value >= 128 else 0, mode="L")
-    foreground = _foreground(mask)
-    total = mask.width * mask.height
-    count = len(foreground)
+    width, height = mask.size
+    total = width * height
+    histogram = mask.histogram()
+    count = sum(histogram[1:])
     coverage = count / max(1, total)
-    bbox = None
-    if foreground:
-        xs = [point[0] for point in foreground]
-        ys = [point[1] for point in foreground]
-        bbox = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
-    components, component_sets = _connected_components(mask, foreground)
-    edge = sum(1 for x, y in foreground if x in (0, mask.width - 1) or y in (0, mask.height - 1))
-    edge_fraction = edge / max(1, count)
+    raw_bbox = mask.getbbox()
+    bbox = tuple(raw_bbox) if raw_bbox is not None else None
+
+    analysis = mask
+    max_analysis_pixels = 250_000
+    if total > max_analysis_pixels:
+        scale = (max_analysis_pixels / total) ** 0.5
+        analysis_size = (
+            max(1, round(width * scale)),
+            max(1, round(height * scale)),
+        )
+        analysis = mask.resize(analysis_size, Image.Resampling.BOX).point(
+            lambda value: 255 if value >= 128 else 0,
+            mode="L",
+        )
+
+    foreground = _foreground(analysis)
+    analysis_count = len(foreground)
+    components, _component_sets = _connected_components(analysis, foreground)
+    edge = sum(
+        1
+        for x, y in foreground
+        if x in (0, analysis.width - 1) or y in (0, analysis.height - 1)
+    )
+    edge_fraction = edge / max(1, analysis_count)
     perimeter = sum(
         1
         for x, y in foreground
-        if any(neighbour not in foreground for neighbour in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)))
+        if any(
+            neighbour not in foreground
+            for neighbour in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1))
+        )
     )
-    perimeter_fraction = perimeter / max(1, count)
-    holes = _hole_fraction(mask, foreground)
+    perimeter_fraction = perimeter / max(1, analysis_count)
+    holes = _hole_fraction(analysis, foreground)
     reasons: list[str] = []
     if count == 0:
         reasons.append("empty_mask")
-    elif coverage < 0.0005:
+    elif coverage < 0.005:
+        # A region below half a percent is usually a prompt marker or isolated
+        # artifact, not a usable protected product on a campaign photograph.
         reasons.append("mask_too_small")
     elif coverage > 0.98:
         reasons.append("mask_covers_almost_entire_image")
-    # A product lock is a protected, contiguous region.  Even one detached
+    # A product lock is a protected, contiguous region. Even one detached
     # island can be a hand, a second product, or hand-painted contamination;
     # fail closed and let a human or a SAM2 refinement decide.
     if components > 1:
@@ -219,23 +249,28 @@ def mask_metrics(mask: Image.Image, *, target_box: NormalizedBox | None = None, 
     if holes > 0.40:
         reasons.append("excessive_holes")
     if target_box is not None and bbox is not None:
-        left = round(target_box.x * mask.width)
-        top = round(target_box.y * mask.height)
-        right = round((target_box.x + target_box.width) * mask.width)
-        bottom = round((target_box.y + target_box.height) * mask.height)
-        tolerance = max(2, round(min(mask.width, mask.height) * 0.03))
-        if bbox[0] < left - tolerance or bbox[1] < top - tolerance or bbox[2] > right + tolerance or bbox[3] > bottom + tolerance:
+        left = round(target_box.x * width)
+        top = round(target_box.y * height)
+        right = round((target_box.x + target_box.width) * width)
+        bottom = round((target_box.y + target_box.height) * height)
+        tolerance = max(2, round(min(width, height) * 0.03))
+        if (
+            bbox[0] < left - tolerance
+            or bbox[1] < top - tolerance
+            or bbox[2] > right + tolerance
+            or bbox[3] > bottom + tolerance
+        ):
             reasons.append("mask_outside_target_box")
     if points is not None:
         pixels = mask.load()
         for point in points.positive_points:
-            x = min(mask.width - 1, round(point.x * (mask.width - 1)))
-            y = min(mask.height - 1, round(point.y * (mask.height - 1)))
+            x = min(width - 1, round(point.x * (width - 1)))
+            y = min(height - 1, round(point.y * (height - 1)))
             if pixels[x, y] == 0:
                 reasons.append("positive_point_outside_mask")
         for point in points.negative_points:
-            x = min(mask.width - 1, round(point.x * (mask.width - 1)))
-            y = min(mask.height - 1, round(point.y * (mask.height - 1)))
+            x = min(width - 1, round(point.x * (width - 1)))
+            y = min(height - 1, round(point.y * (height - 1)))
             if pixels[x, y] > 0:
                 reasons.append("negative_point_inside_mask")
     # Keep score conservative: no suspicious condition is the only route to

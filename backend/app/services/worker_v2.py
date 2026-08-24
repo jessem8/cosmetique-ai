@@ -19,17 +19,32 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
 from ai_core.schemas import GenerationRequestV2
-from ai_service import BackgroundGenerationOrchestrator, ProviderError, ProviderPreflightError
+from ai_service import (
+    decode_image,
+    encode_png,
+    compare_interior_pixels,
+    record_product_transform,
+    restore_original_pixels,
+    run_fail_closed_qa,
+)
 from app.core.config import settings
 from app.database import SessionLocal
 from app.models import (
     Generation,
+    GenerationAttempt,
     GenerationAttemptOutcome,
     GenerationLifecycleStatus,
     GenerationVariantStatus,
     ProviderCostLedger,
 )
-from app.services.ai_pipeline import PixelSafetyDetectors, closerouter_provider, load_lock_object
+from app.services.ai_client import (
+    AIProtocolError,
+    AIRemoteAuthFailed,
+    AIRuntimeClient,
+    AIRuntimeLost,
+    AIServiceUnavailable,
+)
+from app.services.ai_pipeline import PixelSafetyDetectors, load_lock_object
 from app.services.generation_v2 import (
     finalize_cost,
     record_attempt,
@@ -37,6 +52,7 @@ from app.services.generation_v2 import (
     reserve_cost,
     transition_v2,
 )
+from app.services.storage import storage
 
 
 logger = logging.getLogger(__name__)
@@ -259,6 +275,7 @@ class V2GenerationWorker:
                     scene_spec=lock.scene_spec,
                     metrics=lock.metrics,
                     model_provenance=lock.model_provenance,
+                    runtime_lock_id=(lock.model_provenance or {}).get("runtime_lock_id"),
                 ),
             }
 
@@ -516,15 +533,368 @@ class V2GenerationWorker:
             row.claimed_at = None
             row.heartbeat_at = None
 
+    @staticmethod
+    def _editable_boundary_mask(lock: Any) -> bytes:
+        """Return the accepted mask for local/runtime provenance only."""
+        raw = Image.open(io.BytesIO(lock.mask_png)).convert("L")
+        rgba = Image.new("RGBA", raw.size, (255, 255, 255, 0))
+        rgba.putalpha(raw)
+        return encode_png(rgba, mode="RGBA")
+
+    def _compose_local_result(
+        self,
+        *,
+        snapshot: dict[str, Any],
+        lock: Any,
+        request: GenerationRequestV2,
+        background: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Paste the immutable Product Lock cutout over the SDXL scene."""
+        generated = decode_image(background["image_bytes"]).convert("RGBA")
+        placement = request.target_box or request.target_hint or snapshot["lock"].target_geometry
+        transform = record_product_transform(lock, generated.size, placement=placement)
+        restored, transform, protected_mask = restore_original_pixels(
+            generated,
+            lock,
+            transform=transform,
+        )
+        expected, _, _ = restore_original_pixels(
+            generated,
+            lock,
+            transform=transform,
+        )
+        image_bytes = encode_png(restored, mode="RGBA")
+        persisted = decode_image(image_bytes).convert("RGBA")
+        comparison = compare_interior_pixels(persisted, expected, protected_mask)
+        detector = PixelSafetyDetectors(
+            lock,
+            Image.open(io.BytesIO(lock.mask_png)).convert("L"),
+        )
+        qa = run_fail_closed_qa(
+            restored,
+            expected,
+            protected_mask,
+            lock,
+            duplicate_detector=detector,
+            person_hand_detector=detector,
+            require_detectors=True,
+        )
+        passed = bool(qa.passed and comparison.exact)
+        return {
+            "stage": "final_candidate",
+            "status": "ready" if passed else "needs_review",
+            "image_bytes": image_bytes,
+            "sha256": hashlib.sha256(image_bytes).hexdigest(),
+            "mime": "image/png",
+            "model": background.get("model") or "local-sdxl",
+            "model_revision": background.get("model_revision"),
+            "prompt_sha256": background.get("prompt_sha256"),
+            "qa": {
+                "passed": passed,
+                "status": "passed" if passed else "needs_review",
+                "findings": list(qa.findings) + ([] if comparison.exact else ["protected_product_pixels_changed"]),
+                "pixel_comparison": comparison.__dict__,
+                "transform": transform.to_dict(),
+            },
+            "metadata": {
+                **dict(background.get("metadata") or {}),
+                "source": "local-sdxl-background-plus-canonical-cutout-v1",
+                "source_sha256": lock.source_sha256,
+                "canonical_image_sha256": lock.canonical_image_sha256,
+                "mask_sha256": lock.mask_sha256,
+                "cutout_sha256": lock.cutout_sha256,
+                "protected_product_pixels": comparison.exact,
+                "transform": transform.to_dict(),
+            },
+            "cost_usd": 0.0,
+            "provider": "local",
+            "provider_request_id": None,
+        }
+
+    def _persist_stage(
+        self,
+        generation_id: uuid.UUID,
+        *,
+        stage: str,
+        image_bytes: bytes,
+        checksum: str,
+        index: int = 0,
+        status: str = "ready",
+        model: str | None = None,
+        model_revision: str | None = None,
+        prompt_sha256: str | None = None,
+        qa: dict[str, Any] | None = None,
+        error_code: str | None = None,
+    ) -> dict[str, Any]:
+        # Keep stage previews outside the immutable export directory. The
+        # terminal installer owns generations/<id>/ and expects to create it
+        # with only the validated bundle members.
+        key = f"generation-stages/{generation_id}/{stage}-{index + 1}.png"
+        storage.put_bytes(key, image_bytes)
+        entry: dict[str, Any] = {
+            "status": status,
+            "storage_key": key,
+            "sha256": checksum,
+            "mime": "image/png",
+            "bytes": len(image_bytes),
+            "model": model,
+            "model_revision": model_revision,
+            "prompt_sha256": prompt_sha256,
+            "qa": qa,
+        }
+        if error_code:
+            entry["error_code"] = error_code
+        with SessionLocal() as db, db.begin():
+            row = self._load_owned(db, generation_id)
+            manifest = dict(row.artifact_manifest or {})
+            stages = dict(manifest.get("stages") or {})
+            stages[stage] = entry
+            manifest["stages"] = stages
+            row.artifact_manifest = manifest
+            if stage == "baseline":
+                row.runtime_id = row.runtime_id or "ai-runtime"
+        return entry
+
+    def _record_provider_request(self, generation_id: uuid.UUID, attempt: int, request_id: str) -> None:
+        """Durably bind the request id before a paid execute call starts."""
+        with SessionLocal() as db, db.begin():
+            row = self._load_owned(db, generation_id)
+            row.provider_request_id = str(request_id)[:200]
+            receipt = db.scalar(
+                select(GenerationAttempt).where(
+                    GenerationAttempt.generation_id == generation_id,
+                    GenerationAttempt.attempt == attempt,
+                )
+            )
+            if receipt is not None:
+                receipt.provider_request_id = str(request_id)[:200]
+
+    def _enhance_baseline(
+        self,
+        *,
+        snapshot: dict[str, Any],
+        request: GenerationRequestV2,
+        lock: Any,
+        baseline: dict[str, Any],
+        generation_id: uuid.UUID,
+        attempt: int,
+    ) -> tuple[dict[str, Any], Any, str]:
+        del generation_id, attempt
+        return self._compose_local_result(
+            snapshot=snapshot,
+            lock=lock,
+            request=request,
+            background=baseline,
+        ), None, ""
+
+    def _finalize_stages(
+        self,
+        *,
+        snapshot: dict[str, Any],
+        request: GenerationRequestV2,
+        baseline: dict[str, Any],
+        enhanced: dict[str, Any],
+        attempt: int,
+        provider_request_id: str | None,
+    ) -> None:
+        generation_id = snapshot["id"]
+        baseline_entry = self._persist_stage(
+            generation_id,
+            stage="baseline",
+            image_bytes=baseline["image_bytes"],
+            checksum=baseline["sha256"],
+            model=baseline.get("model"),
+            model_revision=baseline.get("model_revision"),
+            prompt_sha256=snapshot.get("background_prompt", {}).get("sha256") or baseline.get("prompt_sha256"),
+            qa=baseline.get("qa") if isinstance(baseline.get("qa"), dict) else None,
+        )
+        enhanced_entry = self._persist_stage(
+            generation_id,
+            stage="enhancement",
+            image_bytes=enhanced["image_bytes"],
+            checksum=enhanced["sha256"],
+            status=enhanced["status"],
+            model=enhanced.get("model"),
+            model_revision=enhanced.get("model_revision"),
+            prompt_sha256=enhanced.get("prompt_sha256"),
+            qa=enhanced.get("qa"),
+            error_code=None if enhanced["status"] == "ready" else "QA_NEEDS_REVIEW",
+        )
+        final_entry = dict(enhanced_entry)
+        final_entry["status"] = enhanced["status"]
+        with SessionLocal() as db, db.begin():
+            row = db.scalar(self._generation_query(generation_id))
+            if row is None or row.claimed_by != self.worker_id:
+                raise RuntimeError("Le lease V2 du job a été perdu avant finalisation.")
+            manifest = dict(row.artifact_manifest or {})
+            stages = dict(manifest.get("stages") or {})
+            stages["baseline"] = baseline_entry
+            stages["enhancement"] = enhanced_entry
+            stages["final_candidate"] = final_entry
+            manifest.update(
+                {
+                    "schema_version": "2.1.0",
+                    "generation_id": str(generation_id),
+                    "product_lock_revision_id": str(snapshot["lock"].id),
+                    "product_lock_revision": int(snapshot["lock"].revision),
+                    "request_hash": snapshot["request_hash"],
+                    "background_prompt": snapshot.get("background_prompt"),
+                    "baseline": {
+                        "sha256": baseline["sha256"],
+                        "model": baseline.get("model"),
+                        "model_revision": baseline.get("model_revision"),
+                        "runtime_job_id": baseline.get("job_id"),
+                        "metadata": baseline.get("metadata") or {},
+                    },
+                    "enhancement": {
+                        "provider": "local",
+                        "model": enhanced.get("model"),
+                        "provider_request_id": None,
+                        "qa": enhanced.get("qa"),
+                    },
+                    "stages": stages,
+                }
+            )
+            final_key = enhanced_entry["storage_key"]
+            row.v2_variants[0].status = (
+                GenerationVariantStatus.READY.value
+                if enhanced["status"] == "ready"
+                else GenerationVariantStatus.NEEDS_REVIEW.value
+            )
+            row.v2_variants[0].artifact_manifest = final_entry
+            row.v2_variants[0].qa_manifest = enhanced.get("qa")
+            row.v2_variants[0].provider_usage = {
+                "provider": "local",
+                "model": enhanced.get("model"),
+                "request_id": None,
+                "source_sha256": snapshot["lock"].source_sha256,
+                "output_sha256": enhanced["sha256"],
+                "cost_usd": enhanced.get("cost_usd", 0.0),
+            }
+            row.v2_variants[0].storage_key = final_key
+            row.v2_variants[0].checksum = enhanced["sha256"]
+            # Keep the existing export contract alive with a small, inspectable
+            # ZIP containing source, lock artifacts, both visual stages, and a
+            # redacted manifest.
+            members: dict[str, bytes] = {
+                "source.png": storage.read_bytes(snapshot["product"].original_storage_key),
+                "mask.png": storage.read_bytes(snapshot["lock"].mask_storage_key),
+                "cutout.png": storage.read_bytes(snapshot["lock"].cutout_storage_key),
+                "baseline.png": baseline["image_bytes"],
+                "enhancement.png": enhanced["image_bytes"],
+            }
+            public_manifest = dict(manifest)
+            public_manifest.pop("stages", None)
+            public_manifest["stages"] = {
+                stage: {
+                    key: value
+                    for key, value in entry.items()
+                    if key != "storage_key"
+                }
+                for stage, entry in stages.items()
+            }
+            public_manifest_bytes = json.dumps(
+                public_manifest,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            members["manifest.json"] = public_manifest_bytes
+            bundle_buffer = io.BytesIO()
+            with zipfile.ZipFile(bundle_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for name, payload in members.items():
+                    archive.writestr(name, payload)
+            bundle = bundle_buffer.getvalue()
+            installed = storage.install_generation(str(generation_id), bundle, members)
+            row.artifact_manifest = manifest
+            row.bundle_storage_key = installed.bundle_key
+            row.bundle_checksum = hashlib.sha256(bundle).hexdigest()
+            cost_row = db.scalar(
+                select(ProviderCostLedger).where(
+                    ProviderCostLedger.generation_id == row.id,
+                    ProviderCostLedger.attempt == attempt,
+                )
+            )
+            charged = 0
+            if cost_row is not None:
+                finalize_cost(
+                    db,
+                    row,
+                    cost_row,
+                    charged_micros=min(charged, int(cost_row.reserved_micros or 0)),
+                    usage_snapshot={
+                        "provider": "local",
+                        "model": enhanced.get("model"),
+                        "provider_request_id": None,
+                        "charged_usd": 0.0,
+                    },
+                )
+            record_attempt(
+                db,
+                row,
+                attempt=attempt,
+                outcome=GenerationAttemptOutcome.SUCCEEDED,
+                request_snapshot_hash=row.request_v2_hash or row.input_snapshot_hash,
+                provider_request_id=provider_request_id,
+                usage_snapshot={
+                    "baseline_sha256": baseline["sha256"],
+                    "enhancement_sha256": enhanced["sha256"],
+                    "provider_request_id": provider_request_id,
+                },
+            )
+            row.provider_request_id = provider_request_id or row.provider_request_id
+            # The process method already enters COMPOSITING before this final
+            # persistence step; transition directly into QA here.
+            transition_v2(db, row, GenerationLifecycleStatus.QUALITY_REVIEW)
+            transition_v2(
+                db,
+                row,
+                GenerationLifecycleStatus.READY
+                if enhanced["status"] == "ready"
+                else GenerationLifecycleStatus.NEEDS_REVIEW,
+                error_code=None if enhanced["status"] == "ready" else "QA_NEEDS_REVIEW",
+            )
+            row.claimed_by = None
+            row.claimed_at = None
+            row.heartbeat_at = None
+
+    def _mark_stage_error(
+        self,
+        generation_id: uuid.UUID,
+        *,
+        stage: str,
+        code: str,
+        unknown: bool = False,
+    ) -> None:
+        """Persist a truthful stage failure while retaining prior artifacts."""
+        with SessionLocal() as db, db.begin():
+            row = self._load_owned(db, generation_id)
+            manifest = dict(row.artifact_manifest or {})
+            stages = dict(manifest.get("stages") or {})
+            previous = dict(stages.get(stage) or {})
+            previous.update(
+                {
+                    "status": "needs_review" if unknown else "failed",
+                    "error_code": code,
+                }
+            )
+            stages[stage] = previous
+            final = dict(stages.get("final_candidate") or {})
+            final.update({"status": "needs_review" if unknown else "failed", "error_code": code})
+            stages["final_candidate"] = final
+            manifest["stages"] = stages
+            row.artifact_manifest = manifest
+
     def process(self, generation_id: uuid.UUID) -> None:
         provider = None
         attempt = 0
         provider_request_id = None
+        baseline = None
         try:
             snapshot = self._snapshot(generation_id)
             request = GenerationRequestV2.model_validate(snapshot["request"])
-            # Reserve the full authorized envelope for this one bounded
-            # attempt.  The actual provider receipt finalizes the charge below.
+            prompt = (request.scene_prompt or "").strip()
+            if len(prompt) < 12:
+                raise AIProtocolError("BACKGROUND_PROMPT_REQUIRED")
             reserved = min(
                 int(request.budget.max_cost_micros),
                 max(1, int(settings.V2_ESTIMATED_COST_PER_VARIANT_MICROS) * request.variant_count),
@@ -538,47 +908,106 @@ class V2GenerationWorker:
                 GenerationLifecycleStatus.GENERATING,
             )
             lock = load_lock_object(snapshot["product"], snapshot["lock"])
-            if request.provider.provider != "closerouter":
-                raise ProviderPreflightError("the selected provider adapter is not installed")
-            provider = closerouter_provider()
-            detector = PixelSafetyDetectors(lock, Image.open(io.BytesIO(lock.mask_png)).convert("L"))
-            outcome = BackgroundGenerationOrchestrator(provider).generate(
-                lock,
-                category=snapshot["product"].category,
-                variants=request.variant_count,
-                seed=request.seed,
-                creative_direction=request.creative_direction or request.scene_prompt,
-                max_cost_usd=request.budget.max_cost_micros / 1_000_000,
-                duplicate_detector=detector,
-                person_hand_detector=detector,
-                require_detectors=True,
+            if not settings.AI_SERVICE_URL:
+                raise AIServiceUnavailable("AI_SERVICE_URL is not configured.")
+            with AIRuntimeClient(
+                base_url=settings.AI_SERVICE_URL,
+                token=settings.AI_SERVICE_TOKEN,
+                connect_timeout_seconds=settings.AI_CONNECT_TIMEOUT_SECONDS,
+                read_timeout_seconds=settings.AI_READ_TIMEOUT_SECONDS,
+                health_timeout_seconds=settings.AI_HEALTH_TIMEOUT_SECONDS,
+            ) as runtime:
+                health = runtime.health()
+                if not health.ready:
+                    raise AIServiceUnavailable("The private GPU runtime is not inference-ready.")
+                baseline = runtime.generate_baseline(
+                    generation_id=str(generation_id),
+                    lock_id=str(
+                        snapshot["lock"].runtime_lock_id or snapshot["lock"].id
+                    ),
+                    category=snapshot["product"].category,
+                    scene_prompt=prompt,
+                    negative_prompt=(
+                        request.scene.negative_prompt
+                        if request.scene is not None
+                        else None
+                    ),
+                    seed=request.seed,
+                    variant_count=request.variant_count,
+                    target_box=(
+                        request.target_box.model_dump(mode="json")
+                        if request.target_box is not None
+                        else request.target_hint.model_dump(mode="json")
+                        if request.target_hint is not None
+                        else snapshot["lock"].target_geometry
+                    ),
+                    prompt_sha256=(
+                        snapshot.get("background_prompt", {}).get("sha256")
+                        or hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+                    ),
+                    request_hash=snapshot["request_hash"],
+                    deadline_seconds=settings.WORKER_JOB_DEADLINE_SECONDS,
+                )
+            if baseline.get("status") not in {"ready", "succeeded", "completed"}:
+                raise AIProtocolError("AI runtime returned a non-ready baseline.")
+            self._set_lifecycle(generation_id, GenerationLifecycleStatus.COMPOSITING)
+            composed = self._compose_local_result(
+                snapshot=snapshot,
+                lock=lock,
+                request=request,
+                background=baseline,
             )
-            provider_request_id = (
-                outcome.variants[-1].manifest.usage.get("provider_request_id")
-                if outcome.variants
-                else None
+            baseline = composed
+            enhanced = composed
+            self._finalize_stages(
+                snapshot=snapshot,
+                request=request,
+                baseline=baseline,
+                enhanced=enhanced,
+                attempt=attempt,
+                provider_request_id=provider_request_id,
             )
-            self._finalize_success(snapshot, outcome, attempt)
-        except ProviderPreflightError:
-            self._fail_job(
+        except AIRuntimeLost:
+            self._mark_stage_error(
                 generation_id,
-                code="PROVIDER_PREFLIGHT_FAILED",
-                client_request_id=getattr(provider, "last_request_id", None),
-                usage_snapshot=self._provider_usage(provider),
+                stage="baseline" if baseline is None else "enhancement",
+                code="AI_RUNTIME_LOST",
             )
-        except ProviderError:
-            # Once execute() has been entered, completion can be unknown.  Do
-            # not auto-retry a paid image edit after a transport/provider error.
-            self._fail_job(
+            self._fail_job(generation_id, code="AI_RUNTIME_LOST", provider_request_id=provider_request_id)
+        except AIRemoteAuthFailed:
+            self._mark_stage_error(
                 generation_id,
-                code="PROVIDER_COMPLETION_UNKNOWN",
-                unknown=True,
-                client_request_id=getattr(provider, "last_request_id", None),
-                usage_snapshot=self._provider_usage(provider),
+                stage="baseline" if baseline is None else "enhancement",
+                code="REMOTE_AUTH_FAILED",
             )
+            self._fail_job(generation_id, code="REMOTE_AUTH_FAILED", provider_request_id=provider_request_id)
+        except AIServiceUnavailable:
+            self._mark_stage_error(
+                generation_id,
+                stage="baseline" if baseline is None else "enhancement",
+                code="AI_SERVICE_UNAVAILABLE",
+            )
+            self._fail_job(generation_id, code="AI_SERVICE_UNAVAILABLE", provider_request_id=provider_request_id)
+        except AIProtocolError as exc:
+            code = "BACKGROUND_PROMPT_REQUIRED" if "BACKGROUND_PROMPT_REQUIRED" in str(exc) else "REMOTE_PROTOCOL_ERROR"
+            self._mark_stage_error(
+                generation_id,
+                stage="baseline" if baseline is None else "enhancement",
+                code=code,
+            )
+            self._fail_job(generation_id, code=code, provider_request_id=provider_request_id)
         except Exception:
             logger.exception("v2_generation_failed generation_id=%s", generation_id)
-            self._fail_job(generation_id, code="V2_PIPELINE_FAILED", provider_request_id=provider_request_id)
+            self._mark_stage_error(
+                generation_id,
+                stage="baseline" if baseline is None else "enhancement",
+                code="V2_PIPELINE_FAILED",
+            )
+            self._fail_job(
+                generation_id,
+                code="V2_PIPELINE_FAILED",
+                provider_request_id=provider_request_id,
+            )
         finally:
             if provider is not None:
                 provider.close()

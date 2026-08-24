@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, NavLink, useNavigate } from 'react-router-dom'
 import { List, Plus, SignOut, X } from '@phosphor-icons/react'
 import { clearSession, getSession } from '../auth/session.js'
+import BrandMark from './BrandMark.jsx'
 
 function Navbar() {
   const navigate = useNavigate()
@@ -30,11 +31,8 @@ function Navbar() {
   return (
     <header className="site-header">
       <nav className="navbar" aria-label="Navigation principale">
-        <Link className="brand" to="/dashboard" onClick={close}>
-          <span className="brand__monogram" aria-hidden="true">
-            CA
-          </span>
-          <span className="brand__name">Cosmetique AI</span>
+        <Link className="brand" to="/" onClick={close} aria-label="Cosmetique AI, accueil public">
+          <BrandMark />
         </Link>
 
         <div className="navbar__links">
@@ -42,15 +40,15 @@ function Navbar() {
             to="/dashboard"
             className={({ isActive }) => (isActive ? 'is-active' : undefined)}
           >
-            Campagnes
+            Extractions
           </NavLink>
         </div>
 
         <div className="navbar__account">
-          {email && <span className="navbar__email">{email}</span>}
+          <span className="navbar__email" title={email || undefined}>{email || 'Espace privé'}</span>
           <Link className="button button--primary button--small" to="/new">
             <Plus size={16} aria-hidden="true" />
-            Nouvelle campagne
+            Extraire un produit
           </Link>
           <button
             type="button"
@@ -81,10 +79,10 @@ function Navbar() {
       {open && (
         <div id="mobile-navigation" className="mobile-navigation">
           <NavLink to="/dashboard" onClick={close}>
-            Campagnes
+            Extractions
           </NavLink>
           <NavLink to="/new" onClick={close}>
-            Nouvelle campagne
+            Extraire un produit
           </NavLink>
           <button type="button" onClick={logout}>
             <SignOut size={18} aria-hidden="true" />

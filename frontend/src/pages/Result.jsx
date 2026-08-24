@@ -52,6 +52,23 @@ const artifactNames = (artifacts) => {
   return []
 }
 
+const stageArtifact = (stage) => {
+  if (!stage) return { filename: null, directUrl: null }
+  const raw = typeof stage === 'string' ? stage : stage.filename || stage.file_name || stage.artifact_name || stage.artifact || stage.url || stage.image_url
+  if (typeof raw !== 'string' || !raw) return { filename: null, directUrl: null }
+  const filename = raw.split('/').pop().split('?')[0]
+  const directUrl = typeof stage === 'object' && (stage.url || stage.image_url || stage.artifact_url) ? (stage.url || stage.image_url || stage.artifact_url) : null
+  return { filename: filename || null, directUrl: directUrl || null }
+}
+
+const lifecycleStages = (generation) => Object.fromEntries(
+  [
+    ['baseline', generation?.baseline || generation?.baseline_artifact],
+    ['enhancement', generation?.enhancement || generation?.enhancement_artifact],
+    ['final_candidate', generation?.final_candidate || generation?.finalCandidate || generation?.final_artifact],
+  ].map(([key, value]) => [key, stageArtifact(value)])
+)
+
 function useCampaignAssets(generation) {
   const [attempt, setAttempt] = useState(0)
   const [state, setState] = useState({
@@ -72,6 +89,11 @@ function useCampaignAssets(generation) {
     () => artifactNames(generation?.artifacts),
     [generation?.artifacts]
   )
+  const stageFiles = useMemo(() => lifecycleStages(generation), [generation])
+  const stageFilenames = useMemo(
+    () => Object.values(stageFiles).filter((stage) => !stage.directUrl).map((stage) => stage.filename).filter(Boolean),
+    [stageFiles]
+  )
 
   useEffect(() => {
     if (generation?.status !== 'done') return undefined
@@ -86,6 +108,7 @@ function useCampaignAssets(generation) {
       ...generationArtifactNames.filter((name) =>
         name.endsWith('-enhanced.jpg')
       ),
+      ...stageFilenames,
     ]
 
     setState({
@@ -143,7 +166,7 @@ function useCampaignAssets(generation) {
       controller.abort()
       ownedUrls.forEach((url) => URL.revokeObjectURL(url))
     }
-  }, [attempt, generation?.id, generation?.status, generationArtifactNames])
+  }, [attempt, generation?.id, generation?.status, generationArtifactNames, stageFilenames])
 
   return {
     urls: state.urls,
@@ -428,6 +451,12 @@ function Result() {
   const platform =
     PLATFORMS.find((item) => item.id === activePlatform) || PLATFORMS[0]
   const platformCopy = generation?.copy?.[activePlatform] || null
+  const stageFiles = lifecycleStages(generation)
+  const stageCards = [
+    ['baseline', 'Baseline locale', 'La première composition issue du runtime GPU.'],
+    ['enhancement', 'Vérification locale', 'Contrôle du rendu et du produit protégé.'],
+    ['final_candidate', 'Candidat final', 'Version proposée après le contrôle de préservation.'],
+  ].filter(([key]) => generation?.[key] || generation?.[key === 'final_candidate' ? 'finalCandidate' : `${key}_artifact`])
   const enhancedFilename = `${platform.id}-enhanced.jpg`
   const hasEnhanced = Boolean(assets.urls[enhancedFilename])
   const displayedFilename = showEnhanced && hasEnhanced ? enhancedFilename : platform.filename
@@ -625,6 +654,22 @@ function Result() {
         </div>
       </header>
 
+      {stageCards.length > 0 && (
+        <section className="result-pipeline" aria-labelledby="pipeline-title">
+          <div className="result-pipeline__heading"><div><p className="eyebrow">Provenance du rendu</p><h2 id="pipeline-title">De la baseline au candidat final</h2></div><p>Chaque sortie conserve son état réel. Une erreur ou une réponse incertaine reste visible.</p></div>
+          <div className="result-pipeline__grid">
+            {stageCards.map(([key, label, description]) => {
+              const stage = stageFiles[key]
+              const stageData = generation?.[key] || generation?.[key === 'final_candidate' ? 'finalCandidate' : `${key}_artifact`]
+              const image = stage.directUrl || (stage.filename ? assets.urls[stage.filename] : '')
+              const status = stageData?.status || stageData?.lifecycle_status || (key === 'final_candidate' ? generation?.qa?.status || 'pending' : 'pending')
+              return <article className="result-pipeline__card" key={key} data-status={status}><div className="result-pipeline__media">{image ? <img src={image} alt={`${label} du produit`} /> : <span aria-hidden="true">{status}</span>}</div><div className="result-pipeline__body"><div><span>{label}</span><strong>{status}</strong></div><p>{description}</p>{stageData?.checksum && <code>{stageData.checksum}</code>}{stageData?.error?.message && <p className="result-pipeline__error">{stageData.error.message}</p>}</div></article>
+            })}
+          </div>
+          {(generation.background_prompt || generation.backgroundPrompt || generation.manifest?.background_prompt || generation.qa) && <dl className="result-provenance"><div><dt>Prompt de décor</dt><dd>{generation.background_prompt || generation.backgroundPrompt || generation.manifest?.background_prompt || 'Non communiqué'}</dd></div><div><dt>QA</dt><dd>{generation.qa?.status || generation.manifest?.qa_status || 'En attente'}</dd></div><div><dt>Révision Product Lock</dt><dd>{generation.product_lock_revision_id || generation.manifest?.product_lock_revision_id || 'Non communiquée'}</dd></div></dl>}
+        </section>
+      )}
+
       {error && (
         <div className="inline-alert inline-alert--error" role="alert">
           <p>{error.message}</p>
@@ -686,7 +731,7 @@ function Result() {
               <img
                 className="platform-viewer__image"
                 src={assets.urls[displayedFilename]}
-                alt={`${showEnhanced && hasEnhanced ? 'Finition publicitaire' : 'Visuel'} ${platform.label} de la campagne`}
+                alt={`${showEnhanced && hasEnhanced ? 'Rendu vérifié' : 'Visuel'} ${platform.label} de la campagne`}
               />
             ) : assets.isLoading ? (
               <div role="status" aria-label={`Chargement du visuel ${platform.label}`}>
@@ -726,7 +771,7 @@ function Result() {
                   aria-pressed={showEnhanced}
                   onClick={() => setShowEnhanced(true)}
                 >
-                  Finition publicitaire
+                  Rendu vérifié
                 </button>
               </div>
             )}

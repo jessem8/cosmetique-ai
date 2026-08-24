@@ -7,10 +7,9 @@ import {
 } from 'react-router-dom'
 import Navbar from './components/Navbar.jsx'
 import Dashboard from './pages/Dashboard.jsx'
-import Generation from './pages/Generation.jsx'
+import Landing from './pages/Landing.jsx'
 import Login from './pages/Login.jsx'
 import Register from './pages/Register.jsx'
-import Result from './pages/Result.jsx'
 import StudioWorkspace from './studio/StudioWorkspace.jsx'
 import {
   hasUsableSession,
@@ -46,7 +45,7 @@ function AppShell({ children }) {
       </main>
       <footer className="site-footer">
         <span>Cosmetique AI</span>
-        <span>Studio privé de campagne produit</span>
+        <span>Studio privé d’extraction produit</span>
       </footer>
     </div>
   )
@@ -58,9 +57,9 @@ function NotFound() {
       <section className="empty-state">
         <p className="eyebrow">404</p>
         <h1>Page introuvable</h1>
-        <p>Ce lien ne correspond à aucune vue du studio.</p>
-        <a className="button button--primary" href="/dashboard">
-          Retour aux campagnes
+        <p>Ce lien ne correspond à aucune vue de l’extraction.</p>
+        <a className="button button--primary" href="/new">
+          Retour à l’extraction
         </a>
       </section>
     </div>
@@ -107,7 +106,7 @@ const protectedRoute = (node) => (
 function App() {
   return (
     <Routes>
-      <Route path="/" element={<Navigate to="/dashboard" replace />} />
+      <Route path="/" element={<Landing />} />
       <Route
         path="/login"
         element={
@@ -130,11 +129,9 @@ function App() {
       <Route path="/studio-v2" element={<Navigate to="/new" replace />} />
       <Route path="/studio/v2" element={<Navigate to="/new" replace />} />
       <Route path="/campaigns/:id/studio" element={protectedRoute(<StudioWorkspace />)} />
-      <Route
-        path="/generations/:id"
-        element={protectedRoute(<Generation />)}
-      />
-      <Route path="/result/:id" element={protectedRoute(<Result />)} />
+      {/* Legacy generation links return to the only supported extraction workflow. */}
+      <Route path="/generations/:id" element={<Navigate to="/new" replace />} />
+      <Route path="/result/:id" element={<Navigate to="/new" replace />} />
       <Route path="*" element={protectedRoute(<NotFound />)} />
     </Routes>
   )

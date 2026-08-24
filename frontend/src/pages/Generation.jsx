@@ -313,7 +313,7 @@ function Generation() {
       <section className="status-shell" aria-live="polite">
         <div className="status-shell__intro">
           <div className="status-orbit" aria-hidden="true">
-            <span>CA</span>
+            <span>•</span>
           </div>
           <div>
             <h2>

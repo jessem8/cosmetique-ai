@@ -1,49 +1,71 @@
-# Cosmetique AI — Campaign Studio V2
+# Cosmetique AI — product extraction workspace
 
-Campaign Studio V2 is the product-preserving cosmetics image engine. Its Colab entry point loads the pinned Grounding DINO, SAM2, and Diffusers snapshots once per GPU runtime, creates immutable product locks, restores the original product pixels after scene generation, runs fail-closed QA, and exposes authenticated `/v2/*` endpoints.
+This branch delivers one supported workflow: upload a product photo, create a real Product Lock, inspect the binary mask and transparent cutout, optionally mark a correction area, and validate the extraction. The active application stops after extraction evidence. Background generation and external image-provider calls are disabled.
 
-## V2 source of truth
+## Active path
 
-- `notebook/pipeline_ia_cosmetique.ipynb` — V2-only Colab bootstrap and smoke test
-- `ai/colab_v2_runtime.py` — model registry, proposal consensus, SAM2 lock engine
-- `ai/colab_v2_service.py` — real Transformers/Diffusers adapters, V2 API, and batch service
-- `ai_service/` — immutable lock, scene, provider, restoration, and QA contracts
-- `frontend/`, `backend/`, `docker/` — website and durable storage layers
+- `frontend/` — authenticated React workspace at `/new`
+- `backend/` — authenticated product upload, Product Lock, refinement, validation, artifact, and engine-status APIs
+- `ai/gpu_runtime.py` — private extraction runtime with explicit readiness gates
+- `ai/gpu_service.py` — native Grounding DINO + SAM2 image extraction and CPU U2Net fallback; historical locks restore only when requested
+- `ai_service/` — image, mask, cutout, provenance, and storage contracts
+- `docker/docker-compose.yml` — CUDA runtime for capable NVIDIA GPUs
+- `docker/docker-compose.cpu.yml` — CPU-only runtime override for MX350/Pascal-class or CPU-only machines
 
-The historical V1 poster module remains in the repository only for compatibility with old records and tests. The V2 notebook, V2 Colab API, and V2 smoke path do not import or execute it.
+The older generation/Colab modules remain only as repository compatibility material. They are not imported by the active frontend or the extraction runtime.
 
-## Colab secrets
+## Runtime choices
 
-Add these in Colab **Secrets**; never paste them into cells or commit them:
-
-- `GITHUB_TOKEN` or `GH_TOKEN`: fine-grained read access to the private checkpoint branch.
-- `HF_TOKEN` or `HUGGINGFACE_TOKEN`: optional for public snapshots; required if a model license/account requires Hub authentication.
-- `NGROK_AUTHTOKEN`: temporary HTTPS tunnel authentication.
-- `COLAB_AI_TOKEN`: recommended high-entropy bearer token for `/v2/*`; the notebook generates one if absent.
-
-Select a T4 GPU and run the notebook cells in order. The runtime cell must print `primary_engine: colab-v2` and `status: ready`. The smoke cell must produce an accepted lock before generation; ambiguous or contaminated inputs stop for correction instead of generating a fake result. The final cell starts the authenticated V2 API and verifies `/v2/health`.
-
-## V2 API
-
-```text
-GET  /v2/health
-POST /v2/product-locks
-GET  /v2/product-locks/{lock_id}
-POST /v2/product-locks/{lock_id}/refinements
-GET  /v2/product-locks/{lock_id}/artifacts/{artifact}
-POST /v2/generations
-GET  /v2/generations/{generation_id}
-GET  /v2/generations/{generation_id}/variants/{variant_index}/image
-POST /v2/batches
-```
-
-Every request is bearer-authenticated when `COLAB_AI_TOKEN` is configured. The health response reports the runtime ID, resolved model revisions, device, and optional-model failures.
-
-## Local verification
+For a capable NVIDIA GPU:
 
 ```powershell
-python -m pytest ai/tests
-python -c "import nbformat; p='notebook/pipeline_ia_cosmetique.ipynb'; nb=nbformat.read(p, as_version=4); nbformat.validate(nb); print('notebook valid')"
+docker compose --env-file docker/.env -f docker/docker-compose.yml up -d --build
 ```
 
-A fresh T4 run with authorized product images is still an external acceptance gate. CPU tests prove contracts and fake-adapter behavior; they do not prove that Colab downloaded the real snapshots or produced acceptable images.
+For an MX350 or a machine where CUDA is not usable:
+
+```powershell
+docker compose --env-file docker/.env -f docker/docker-compose.yml -f docker/docker-compose.cpu.yml up -d --build
+```
+
+The CPU override uses ONNX Runtime with U2Net and explicitly resets the base NVIDIA reservation. It does not load the native SAM2/Grounding DINO stack; U2Net initializes in the background so the API binds immediately.
+
+The GPU runtime is adaptive in `GPU_RUNTIME_MODE=auto`: it uses the native image-only detector/segmenter when the installed CUDA stack can execute it, otherwise it reports the reason and uses the CPU extraction engine. No generation model is loaded on this path.
+
+## Manual test
+
+1. Open `http://localhost:5173` and sign in, or use the existing local session.
+2. Open **Extraire un produit**.
+3. Choose a real JPG, PNG, or WebP product image and enter its name.
+4. Select **Créer le Product Lock** / **Extraire le produit**.
+5. Inspect the source, mask overlay, transparent cutout, confidence, revision, and model provenance.
+6. If necessary, paint only the defective area and recalculate.
+7. Validate the extraction. The workflow intentionally stops there.
+
+A successful request must leave real server artifacts for the source, mask, and cutout. Startup does not scan or decode every historical artifact, and high-resolution topology checks use a bounded analysis copy while the persisted mask/cutout remain full resolution. A healthy container alone is not a claim that the segmentation is visually correct.
+
+## Verification
+
+```powershell
+# from the repository root
+python -m pytest ai/tests -q
+
+# backend tests need both backend and shared packages on PYTHONPATH
+Push-Location backend
+$env:PYTHONPATH = ".;.."
+python -m pytest tests -q --basetemp=.pytest-tmp
+Pop-Location
+
+# frontend
+Push-Location frontend
+npm run test:run
+npm run lint
+npm run build
+Pop-Location
+
+docker compose --env-file docker/.env -f docker/docker-compose.yml config --quiet
+docker compose --env-file docker/.env -f docker/docker-compose.yml -f docker/docker-compose.cpu.yml config --quiet
+git diff --check
+```
+
+Do not commit local `docker/.env`, model caches, or generated artifacts containing secrets.

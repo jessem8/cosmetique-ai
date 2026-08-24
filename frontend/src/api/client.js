@@ -15,6 +15,7 @@ export const STUDIO_V2_ENDPOINTS = Object.freeze({
   batches: `${STUDIO_V2_ROOT}/batches`,
 })
 const DEFAULT_TIMEOUT = 30_000
+const EXTRACTION_TIMEOUT = 15 * 60_000
 const DOWNLOAD_TIMEOUT = 120_000
 
 export class ApiError extends Error {
@@ -204,6 +205,7 @@ export const studioV2 = {
     create: (data, { idempotencyKey, signal } = {}) =>
       client.post(STUDIO_V2_ENDPOINTS.productLocks, data, {
         signal,
+        timeout: EXTRACTION_TIMEOUT,
         headers: {
           'Idempotency-Key': idempotencyKey,
         },
@@ -219,7 +221,7 @@ export const studioV2 = {
       client.post(
         `${STUDIO_V2_ENDPOINTS.productLocks}/${encodedId(id)}/refine`,
         data,
-        { signal }
+        { signal, timeout: EXTRACTION_TIMEOUT }
       ),
     validate: (id, data = {}, { signal } = {}) =>
       client.post(
@@ -287,6 +289,11 @@ export const studioV2 = {
         `${STUDIO_V2_ENDPOINTS.generations}/${encodedId(generationId)}/variants/${encodedId(variantId)}/image`,
         { signal, responseType: 'blob' }
       ),
+    stageImage: (generationId, stage, { signal } = {}) =>
+      client.get(
+        `${STUDIO_V2_ENDPOINTS.generations}/${encodedId(generationId)}/stages/${encodeURIComponent(stage)}`,
+        { signal, responseType: 'blob' }
+      ),
     exportBundle: (id, { signal } = {}) =>
       client.get(`${STUDIO_V2_ENDPOINTS.generations}/${encodedId(id)}/export`, {
         signal,
@@ -294,6 +301,15 @@ export const studioV2 = {
         timeout: DOWNLOAD_TIMEOUT,
       }),
   },
+}
+
+export const showcase = {
+  get: ({ signal } = {}) => client.get('/showcase', { signal }),
+  artifact: (filename, { signal } = {}) =>
+    client.get('/showcase/artifacts/' + encodeURIComponent(filename), {
+      signal,
+      responseType: 'blob',
+    }),
 }
 
 export default client

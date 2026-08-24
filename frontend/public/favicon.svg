@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Cosmetique AI">
   <rect width="64" height="64" rx="12" fill="#191c21"/>
-  <path d="M13 13h38v38H13z" fill="none" stroke="#8f1644" stroke-width="2"/>
-  <text x="32" y="39" fill="#fff" font-family="Georgia,serif" font-size="23" text-anchor="middle">CA</text>
+  <rect x="13" y="13" width="38" height="38" rx="8" fill="none" stroke="#f8e7ee" stroke-width="3"/>
+  <path d="M23 42 28.5 22h7L41 42h-5l-1.1-4.2h-6L27.8 42H23Zm7-8.2h3l-1.5-5.8-1.5 5.8Z" fill="#f8e7ee"/>
 </svg>

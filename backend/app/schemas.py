@@ -223,6 +223,20 @@ class GenerationHistory(StrictModel):
     next_cursor: str | None
 
 
+class ShowcaseFinalCandidateOut(StrictModel):
+    """Public projection of one accepted final image; no source/private keys."""
+
+    filename: str = Field(pattern=r"^showcase-[0-9a-f]{64}\.png$")
+    artifact_name: str
+    image_url: str
+    alt: str = Field(min_length=1, max_length=200)
+    product_name: str | None = Field(default=None, max_length=200)
+
+
+class ShowcaseOut(StrictModel):
+    final_candidate: ShowcaseFinalCandidateOut
+
+
 # ---------------------------------------------------------------------------
 # Campaign Studio V2 contracts.  These are API-facing projections of the
 # canonical ai_core models.  Private storage keys and provider credentials are
@@ -286,6 +300,33 @@ class ProviderProfileOut(StrictModel):
     capability_flags: list[str] = Field(default_factory=list)
 
 
+class GenerationStageOut(StrictModel):
+    """Safe projection of one durable generation stage artifact."""
+
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())
+    status: str = Field(min_length=1, max_length=40)
+    artifact_url: str | None = None
+    checksum: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    mime: str | None = Field(default=None, max_length=100)
+    bytes: int | None = Field(default=None, ge=0)
+    model: str | None = Field(default=None, max_length=200)
+    model_revision: str | None = Field(default=None, max_length=200)
+    prompt_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    qa: dict[str, Any] | None = None
+    error: ErrorOut | None = None
+
+    @field_validator("artifact_url")
+    @classmethod
+    def browser_relative_artifact_url(cls, value: str | None) -> str | None:
+        if value is not None and (
+            not value.startswith("/api/")
+            or "://" in value
+            or "\\" in value
+        ):
+            raise ValueError("artifact_url must be a backend-relative URL")
+        return value
+
+
 class GenerationV2Out(StrictModel):
     id: uuid.UUID
     product_id: uuid.UUID
@@ -302,6 +343,11 @@ class GenerationV2Out(StrictModel):
     variant_count: int = Field(ge=1, le=32)
     attempt_count: int = Field(ge=0)
     provider_request_id: str | None = None
+    # Stage projections are deliberately optional while a job is accepted or
+    # processing.  They contain only backend-owned relative artifact URLs.
+    baseline: GenerationStageOut | None = None
+    enhancement: GenerationStageOut | None = None
+    final_candidate: GenerationStageOut | None = None
     unknown_remote_completion: bool = False
     cancellation_requested: bool = False
     budget_authorized_micros: int = Field(ge=0)

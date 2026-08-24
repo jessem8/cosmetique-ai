@@ -1,9 +1,9 @@
-"""V2-only Colab service and real Hugging Face model adapters.
+"""Extraction-only GPU service and real Hugging Face model adapters.
 
-This module is the notebook-facing entry point. It never imports or calls the
-historical V1 poster pipeline. The runtime loads Grounding DINO, SAM2, and the
-Diffusers inpainting checkpoint once, then exposes product-lock, generation,
-and batch contracts over an authenticated API.
+This module is the private in-container entry point. It never imports or calls
+the historical V1 poster pipeline. The runtime loads Grounding DINO and native
+SAM2 once, then exposes the product-lock contract over an authenticated API.
+Background generation is deliberately disabled in this runtime.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import binascii
 import io
 import json
 import os
+from pathlib import Path
 import secrets
 import socket
 import threading
@@ -31,12 +32,13 @@ from ai_service.contracts import (
     new_request_id,
 )
 from ai_service.diffusers_adapter import DiffusersInpaintingAdapter, FakeInpaintingAdapter
-from ai_service.image import decode_image, encode_png
+from ai_service.image import ProductLockProcessor, decode_image, encode_png
 from ai_service.orchestration import BackgroundGenerationOrchestrator
+from ai_service.segmentation import U2NetSegmenter
 
-from ai.colab_v2_runtime import (
-    ColabProductLockEngine,
-    ColabRuntime,
+from ai.gpu_models import (
+    GpuProductLockEngine,
+    GpuModelRuntime,
     ModelRegistry,
     ResolvedModel,
     RuntimeUnavailable,
@@ -68,8 +70,8 @@ class TransformersGroundingDINO:
         results = self.processor.post_process_grounded_object_detection(
             outputs,
             inputs["input_ids"],
-            threshold=float(os.getenv("COLAB_DINO_THRESHOLD", "0.35")),
-            text_threshold=float(os.getenv("COLAB_DINO_TEXT_THRESHOLD", "0.25")),
+            threshold=float(os.getenv("GPU_RUNTIME_DINO_THRESHOLD", "0.35")),
+            text_threshold=float(os.getenv("GPU_RUNTIME_DINO_TEXT_THRESHOLD", "0.25")),
             target_sizes=[(image.height, image.width)],
         )
         result = results[0]
@@ -92,12 +94,11 @@ class TransformersGroundingDINO:
         return tuple(proposals)
 
 
-class TransformersSAM2Predictor:
-    """Adapter for SAM2 box and positive/negative point refinement."""
+class NativeSAM2Predictor:
+    """Adapter for Meta's native static-image SAM2 predictor."""
 
-    def __init__(self, processor: Any, model: Any, device: str) -> None:
-        self.processor = processor
-        self.model = model
+    def __init__(self, predictor: Any, device: str) -> None:
+        self.predictor = predictor
         self.device = device
 
     def predict(
@@ -109,37 +110,38 @@ class TransformersSAM2Predictor:
         box: Mapping[str, Any] | None,
         normalized_coordinates: bool = True,
     ) -> dict[str, Any]:
+        import numpy as np
         import torch
 
         if box is None or not normalized_coordinates:
             raise RuntimeUnavailable("SAM2 requires a normalized product box")
-        pixel_box = [
-            float(box["x"] * image.width),
-            float(box["y"] * image.height),
-            float((box["x"] + box["width"]) * image.width),
-            float((box["y"] + box["height"]) * image.height),
-        ]
-        kwargs: dict[str, Any] = {"input_boxes": [[pixel_box]]}
-        if points:
-            kwargs["input_points"] = [[
-                [[float(x * image.width), float(y * image.height)] for x, y in points]
-            ]]
-            kwargs["input_labels"] = [[list(point_labels)]]
-        inputs = _prepare_inputs(
-            self.processor(image.convert("RGB"), return_tensors="pt", **kwargs),
-            self.model,
-            self.device,
+        pixel_box = np.asarray(
+            [
+                float(box["x"] * image.width),
+                float(box["y"] * image.height),
+                float((box["x"] + box["width"]) * image.width),
+                float((box["y"] + box["height"]) * image.height),
+            ],
+            dtype=np.float32,
         )
+        point_coords = None
+        labels = None
+        if points:
+            point_coords = np.asarray(
+                [[float(x * image.width), float(y * image.height)] for x, y in points],
+                dtype=np.float32,
+            )
+            labels = np.asarray(point_labels, dtype=np.int32)
         with torch.inference_mode():
-            outputs = self.model(**inputs, multimask_output=True)
-        masks = self.processor.image_processor.post_process_masks(
-            outputs.pred_masks.cpu(),
-            inputs["original_sizes"].cpu(),
-        )[0][0]
-        scores = outputs.iou_scores[0][0].detach().cpu()
-        index = int(scores.argmax().item()) if scores.numel() else 0
-        mask = masks[index].numpy() if hasattr(masks[index], "numpy") else masks[index]
-        return {"mask": mask, "score": float(scores[index].item()) if scores.numel() else None}
+            with torch.autocast(self.device, dtype=torch.bfloat16, enabled=self.device == "cuda"):
+                self.predictor.set_image(np.asarray(image.convert("RGB")))
+                masks, scores, _ = self.predictor.predict(
+                    point_coords=point_coords,
+                    point_labels=labels,
+                    box=pixel_box,
+                    multimask_output=False,
+                )
+        return {"mask": masks[0], "score": float(scores[0]) if len(scores) else None}
 
 
 def _device() -> str:
@@ -190,20 +192,17 @@ def _load_grounding_dino(model: ResolvedModel, device: str) -> TransformersGroun
     return TransformersGroundingDINO(processor, loaded, device)
 
 
-def _load_sam2(model: ResolvedModel, device: str) -> TransformersSAM2Predictor:
-    import torch
-    from transformers import AutoModel, AutoProcessor
+def _load_sam2(model: ResolvedModel, device: str) -> NativeSAM2Predictor:
+    from sam2.build_sam import build_sam2
+    from sam2.sam2_image_predictor import SAM2ImagePredictor
 
-    processor = AutoProcessor.from_pretrained(model.path)
-    load_options: dict[str, Any] = {
-        # Keep detector weights and processor pixels in FP32. These models are
-        # released before SDXL loads, so correctness is worth the small memory cost.
-        "dtype": torch.float32,
-        "low_cpu_mem_usage": True,
-    }
-    loaded = AutoModel.from_pretrained(model.path, **load_options)
-    loaded.to(device).float().eval()
-    return TransformersSAM2Predictor(processor, loaded, device)
+    checkpoint = Path(model.path) / "sam2.1_hiera_large.pt"
+    loaded = build_sam2(
+        "configs/sam2.1/sam2.1_hiera_l.yaml",
+        ckpt_path=str(checkpoint),
+        device=device,
+    )
+    return NativeSAM2Predictor(SAM2ImagePredictor(loaded), device)
 
 
 def _load_inpainting(model: ResolvedModel, device: str) -> DiffusersInpaintingAdapter:
@@ -212,7 +211,10 @@ def _load_inpainting(model: ResolvedModel, device: str) -> DiffusersInpaintingAd
     from diffusers import StableDiffusionXLInpaintPipeline
 
     options: dict[str, Any] = {
-        "dtype": torch.float16 if device == "cuda" else torch.float32,
+        # Diffusers 0.35.x expects torch_dtype here. Passing the newer
+        # dtype keyword is ignored by this pinned runtime and materializes
+        # SDXL in FP32, which exceeds the 8 GB Docker memory budget.
+        "torch_dtype": torch.float16 if device == "cuda" else torch.float32,
         "use_safetensors": True,
         "low_cpu_mem_usage": True,
     }
@@ -252,17 +254,17 @@ def _real_factories(device: str) -> dict[str, Callable[[ResolvedModel], Any]]:
     }
 
 
-class ColabDiffusersProvider:
+class GpuDiffusersProvider:
     """Provider contract with lazy SDXL loading for constrained T4 RAM."""
 
-    provider_name = "colab"
+    provider_name = "gpu"
 
     def __init__(
         self,
         adapter: DiffusersInpaintingAdapter | None,
         model: str,
         *,
-        runtime: ColabRuntime | None = None,
+        runtime: GpuModelRuntime | None = None,
         adapter_factory: Callable[[], DiffusersInpaintingAdapter] | None = None,
     ) -> None:
         self.adapter = adapter
@@ -273,7 +275,7 @@ class ColabDiffusersProvider:
     def _ensure_adapter(self) -> DiffusersInpaintingAdapter:
         if self.adapter is None:
             if self.runtime is None or self.adapter_factory is None:
-                raise RuntimeUnavailable("Colab Diffusers adapter is not configured")
+                raise RuntimeUnavailable("GPU Diffusers adapter is not configured")
             self.runtime.suspend_detectors()
             self.adapter = self.adapter_factory()
         return self.adapter
@@ -297,7 +299,7 @@ class ColabDiffusersProvider:
 
         return (
             ProviderCapabilities(
-                provider="colab",
+                provider="gpu",
                 model=self.model,
                 endpoint="local-diffusers-inpainting",
                 supports_generation=True,
@@ -316,10 +318,10 @@ class ColabDiffusersProvider:
     def plan(self, spec: GenerationSpec, *, operation: str = "generation", max_cost_usd: float | None = None) -> ExecutionPlan:
         preflight = self.preflight(spec, operation=operation, max_cost_usd=max_cost_usd)
         if not preflight.allowed:
-            raise RuntimeUnavailable(preflight.reason or "Colab provider preflight failed")
+            raise RuntimeUnavailable(preflight.reason or "GPU provider preflight failed")
         return ExecutionPlan(
             request_id=new_request_id(),
-            provider="colab",
+            provider="gpu",
             operation=operation,
             capabilities=self.discover()[0],
             spec=spec,
@@ -344,8 +346,8 @@ class ColabDiffusersProvider:
                 seed=plan.spec.seed,
                 width=plan.spec.width,
                 height=plan.spec.height,
-                num_inference_steps=int(os.getenv("COLAB_INPAINT_STEPS", "30")),
-                guidance_scale=float(os.getenv("COLAB_INPAINT_GUIDANCE", "7.0")),
+                num_inference_steps=int(os.getenv("GPU_RUNTIME_INPAINT_STEPS", "30")),
+                guidance_scale=float(os.getenv("GPU_RUNTIME_INPAINT_GUIDANCE", "7.0")),
             ).convert("RGB")
             payload = encode_png(output, mode="RGB")
             return NormalizedImageResult(
@@ -355,9 +357,9 @@ class ColabDiffusersProvider:
                 height=output.height,
                 sha256=sha256_bytes(payload),
                 request_id=plan.request_id,
-                provider="colab",
+                provider="gpu",
                 model=self.model,
-                usage={"runtime": "colab", "billable": False},
+                usage={"runtime": "gpu", "billable": False},
                 cost_usd=0.0,
                 deterministic_seed_claim=False,
             )
@@ -367,10 +369,10 @@ class ColabDiffusersProvider:
 
 
 @dataclass
-class ColabSafetyDetectors:
-    runtime: ColabRuntime
+class GpuSafetyDetectors:
+    runtime: GpuModelRuntime
 
-    def _engine(self) -> ColabProductLockEngine:
+    def _engine(self) -> GpuProductLockEngine:
         if self.runtime.engine is None:
             self.runtime.resume_detectors()
         if self.runtime.engine is None:
@@ -384,6 +386,47 @@ class ColabSafetyDetectors:
             return engine._distinct_product_count(proposals) > 1
         except Exception:
             return None
+
+
+@dataclass
+class CpuProductLockRuntime:
+    """Low-memory extraction runtime for Pascal and CPU-only machines."""
+
+    engine: Any
+    runtime_id: str = field(default_factory=lambda: f"cpu-u2net-{uuid.uuid4().hex[:12]}")
+    status: str = "ready"
+    reason: str | None = None
+
+    def health(self) -> dict[str, Any]:
+        return {
+            "primary_engine": "cpu-u2net",
+            "status": self.status,
+            "runtime_id": self.runtime_id,
+            "models": {"u2net": {"repo_id": "danielgatis/rembg/u2net.onnx", "execution_provider": "CPUExecutionProvider"}},
+            "reason": self.reason,
+        }
+
+
+class CpuProductLockEngine:
+    """Product-lock adapter backed by the lazy CPU ONNX U2Net segmenter."""
+
+    def __init__(self, *, model_dir: str | Path) -> None:
+        self.processor = ProductLockProcessor(
+            segmenter=U2NetSegmenter(model_dir=model_dir, model="u2net"),
+            min_score=0.65,
+            accept_model_confidence=0.0,
+            strict=False,
+        )
+
+    def create_lock(self, source: bytes, *, refinement: Any = None, target_box: Any = None) -> Any:
+        return self.processor.create(
+            source,
+            refinement=refinement,
+            target_box=target_box,
+        )
+
+    def refine(self, lock: Any, source: bytes, refinement: Mapping[str, Any]) -> Any:
+        return self.processor.refine(lock, refinement)
 
     def detect_person_or_hands(self, image: Image.Image) -> Mapping[str, bool] | None:
         try:
@@ -399,21 +442,105 @@ class ColabSafetyDetectors:
 
 
 @dataclass
-class ColabV2Service:
-    runtime: ColabRuntime
-    provider: ColabDiffusersProvider
+class GpuV2Service:
+    runtime: GpuModelRuntime
+    provider: Any
     locks: dict[str, Any] = field(default_factory=dict)
     generations: dict[str, Any] = field(default_factory=dict)
+    generation_artifacts: dict[str, tuple[bytes, ...]] = field(default_factory=dict)
+    artifact_root: Path = field(
+        default_factory=lambda: Path(os.getenv("ARTIFACT_ROOT", "/artifacts"))
+    )
+    persistence_errors: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self._lock_root().mkdir(parents=True, exist_ok=True)
+        # Do not scan and decode every historical source/mask at startup.
+        # A lock is restored on demand by its explicit ID, keeping startup
+        # independent of the size of the artifact volume.
+
+    def _lock_root(self) -> Path:
+        return self.artifact_root / "product-locks"
+
+    def _lock_path(self, lock_id: str) -> Path:
+        safe_id = str(lock_id)
+        if not safe_id or Path(safe_id).name != safe_id or safe_id in {".", ".."}:
+            raise ValueError("product lock id is invalid")
+        return self._lock_root() / safe_id
+
+    def _generation_artifact_path(self, generation_id: str, index: int = 0) -> Path:
+        safe_id = str(generation_id)
+        if not safe_id or Path(safe_id).name != safe_id or safe_id in {".", ".."}:
+            raise ValueError("generation id is invalid")
+        return self.artifact_root / "generations" / safe_id / f"baseline-{index + 1}.png"
+
+    def _persist_lock(self, lock: Any) -> None:
+        directory = self._lock_path(lock.lock_id)
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "source.png").write_bytes(lock.canonical_image_png)
+            (directory / "mask.png").write_bytes(lock.mask_png)
+            (directory / "lock.json").write_text(
+                json.dumps(
+                    {
+                        "lock_id": lock.lock_id,
+                        "revision": lock.revision,
+                        "source_sha256": lock.source_sha256,
+                        "source_mime": lock.source_mime,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            raise RuntimeUnavailable("product lock artifacts could not be persisted") from exc
+
+    def _restore_lock(self, lock_id: str) -> Any | None:
+        directory = self._lock_path(lock_id)
+        metadata_path = directory / "lock.json"
+        if not metadata_path.is_file():
+            return None
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            stored_id = str(metadata.get("lock_id") or lock_id)
+            if stored_id != lock_id or Path(stored_id).name != stored_id:
+                raise ValueError("persisted product lock id is invalid")
+            source = (directory / "source.png").read_bytes()
+            mask = (directory / "mask.png").read_bytes()
+            lock = ProductLockProcessor().create(
+                source,
+                mask=mask,
+                source_mime=str(metadata.get("source_mime") or "image/png"),
+                lock_id=stored_id,
+                revision=int(metadata.get("revision") or 0),
+                source_sha256=str(metadata["source_sha256"]),
+            )
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            self.persistence_errors.append(str(lock_id))
+            return None
+        self.locks[lock.lock_id] = lock
+        return lock
+
+    def _load_persisted_locks(self) -> None:
+        root = self._lock_root()
+        if not root.is_dir():
+            return
+        for directory in root.iterdir():
+            if directory.is_dir():
+                self._restore_lock(directory.name)
 
     def health(self) -> dict[str, Any]:
         payload = self.runtime.health()
-        payload["primary_engine"] = "colab-v2"
+        payload["primary_engine"] = "gpu-v2"
         payload.update(
             {
-                "service": "campaign-studio-v2-colab",
-                "generation_provider": "colab-diffusers",
-                "generation_model": self.provider.model,
-                "generation_loaded": self.provider.adapter is not None,
+                "service": "campaign-studio-product-extraction",
+                "capability": "product-extraction",
+                "background_generation": False,
+                "generation_provider": "disabled",
+                "generation_model": None,
+                "generation_loaded": False,
             }
         )
         return payload
@@ -423,20 +550,28 @@ class ColabV2Service:
             raise RuntimeUnavailable("V2 runtime is not ready")
         lock = self.runtime.engine.create_lock(source, refinement=refinement, target_box=target_box)
         self.locks[lock.lock_id] = lock
+        self._persist_lock(lock)
         return lock
 
     def refine_lock(self, lock_id: str, source: bytes, refinement: Mapping[str, Any]) -> Any:
+        if lock_id not in self.locks:
+            self._restore_lock(lock_id)
         if lock_id not in self.locks or self.runtime.engine is None:
             raise KeyError("product lock not found")
         lock = self.runtime.engine.refine(self.locks[lock_id], source, refinement)
         self.locks[lock.lock_id] = lock
+        self._persist_lock(lock)
         return lock
 
     def generate(self, lock_id: str, *, category: str, variants: int = 1, seed: int | None = None, creative_direction: str | None = None) -> tuple[str, Any]:
-        lock = self.locks.get(lock_id)
+        raise RuntimeUnavailable("background generation is disabled; this runtime only extracts products")
+
+        # Historical generation implementation retained below for fixture
+        # compatibility. It is unreachable in the production extraction service.
+        lock = self.locks.get(lock_id) or self._restore_lock(lock_id)
         if lock is None or self.runtime.engine is None:
             raise KeyError("product lock not found")
-        detectors = ColabSafetyDetectors(self.runtime)
+        detectors = GpuSafetyDetectors(self.runtime)
         outcome = BackgroundGenerationOrchestrator(self.provider).generate(
             lock,
             category=category,
@@ -449,6 +584,13 @@ class ColabV2Service:
         )
         generation_id = str(uuid.uuid4())
         self.generations[generation_id] = outcome
+        self.generation_artifacts[generation_id] = tuple(
+            encode_png(item.image, mode="RGBA") for item in outcome.variants
+        )
+        for index, image_bytes in enumerate(self.generation_artifacts[generation_id]):
+            path = self._generation_artifact_path(generation_id, index)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(image_bytes)
         return generation_id, outcome
 
     def batch(self, items: Sequence[tuple[str, bytes]], *, category: str, seed: int = 42, creative_direction: str | None = None) -> list[dict[str, Any]]:
@@ -478,55 +620,97 @@ class ColabV2Service:
             results.append(row)
         return results
 
-    @staticmethod
-    def generation_payload(generation_id: str, outcome: Any) -> dict[str, Any]:
+    def generation_payload(self, generation_id: str, outcome: Any) -> dict[str, Any]:
+        manifests = [item.manifest.to_dict() for item in outcome.variants]
+        first = manifests[0] if manifests else {}
+        usage = first.get("usage") if isinstance(first.get("usage"), dict) else {}
+        overall_status = "ready" if all(item.qa.passed for item in outcome.variants) else "needs_review"
+        artifact_key = f"generations/{generation_id}/baseline-1.png"
+        image_bytes = self.generation_artifacts.get(generation_id, (b"",))[0]
+        baseline = {
+            "stage": "baseline",
+            "status": "ready",
+            "artifact_key": artifact_key,
+            "artifact_url": f"/v2/generations/{generation_id}/variants/0/image",
+            "sha256": sha256_bytes(image_bytes),
+            "mime": "image/png",
+            "width": outcome.variants[0].image.width if outcome.variants else None,
+            "height": outcome.variants[0].image.height if outcome.variants else None,
+            "bytes": len(image_bytes),
+            "model": first.get("model"),
+            "prompt_sha256": first.get("prompt_sha256"),
+            "seed": first.get("seed"),
+            "provider_request_id": usage.get("provider_request_id"),
+            "qa": first.get("qa"),
+        }
         return {
             "id": generation_id,
-            "status": "ready" if all(item.qa.passed for item in outcome.variants) else "needs_review",
+            "status": overall_status,
+            "model": first.get("model"),
+            "prompt_sha256": first.get("prompt_sha256"),
+            "seed": first.get("seed"),
+            "provider_request_id": usage.get("provider_request_id"),
+            "baseline": baseline,
             "scene_plan": {
                 "category": outcome.scene_plan.category,
                 "prompt": outcome.scene_plan.prompt,
                 "negative_prompt": outcome.scene_plan.negative_prompt,
                 "plan_sha256": outcome.scene_plan.plan_sha256,
             },
-            "variants": [item.manifest.to_dict() for item in outcome.variants],
+            "variants": manifests,
         }
 
 
-def build_service(*, hf_token: str | None = None, cache_dir: str = "/content/campaign-studio-models") -> ColabV2Service:
+class ExtractionOnlyProvider:
+    """Explicit disabled provider that prevents accidental scene generation."""
+
+    provider_name = "product-extraction"
+    model = "native-sam2"
+    adapter = None
+
+    def discover(self) -> tuple[Any, ...]:
+        return ()
+
+    def plan(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeUnavailable("background generation is disabled; this runtime only extracts products")
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeUnavailable("background generation is disabled; this runtime only extracts products")
+
+
+def build_service(*, hf_token: str | None = None, cache_dir: str = "/content/campaign-studio-models") -> GpuV2Service:
     device = _device()
     if device != "cuda":
-        raise RuntimeUnavailable("a CUDA Colab runtime is required for Campaign Studio V2")
-    runtime = ColabRuntime(ModelRegistry(cache_dir=cache_dir))
+        raise RuntimeUnavailable("a CUDA GPU runtime is required for Campaign Studio V2")
+    runtime = GpuModelRuntime(ModelRegistry(cache_dir=cache_dir))
     runtime.start(_real_factories(device), token=hf_token)
-    inpaint_model = runtime.registry.resolved.get("inpaint")
-    if inpaint_model is None:
-        raise RuntimeUnavailable("the V2 inpainting snapshot was not resolved")
-    provider = ColabDiffusersProvider(
-        None,
-        inpaint_model.repo_id,
-        runtime=runtime,
-        adapter_factory=lambda: _load_inpainting(inpaint_model, device),
+    return GpuV2Service(runtime=runtime, provider=ExtractionOnlyProvider())
+
+
+def build_cpu_service(*, cache_dir: str = "/models") -> GpuV2Service:
+    runtime = CpuProductLockRuntime(
+        engine=CpuProductLockEngine(model_dir=Path(cache_dir) / "segmentation"),
+        reason="GPU unavailable or below the native SAM2 capability threshold; using CPU ONNX extraction.",
     )
-    return ColabV2Service(runtime=runtime, provider=provider)
+    return GpuV2Service(runtime=runtime, provider=ExtractionOnlyProvider())
 
 
-def create_app(service: ColabV2Service) -> Any:
+def create_app(service: GpuV2Service) -> Any:
     """Create the authenticated V2-only FastAPI application."""
     from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
     from fastapi.responses import Response
 
     globals().update({"Request": Request, "Response": Response, "UploadFile": UploadFile})
-    app = FastAPI(title="Campaign Studio V2 Colab", version="2.0.0")
+    app = FastAPI(title="Campaign Studio V2 GPU", version="2.0.0")
 
     @app.middleware("http")
     async def authenticate(request: Request, call_next: Any) -> Any:
-        expected = os.getenv("COLAB_AI_TOKEN", "").strip()
+        expected = os.getenv("AI_SERVICE_TOKEN", "").strip()
         if expected and request.url.path.startswith("/v2/"):
             supplied = request.headers.get("authorization", "")
             if not secrets.compare_digest(supplied, f"Bearer {expected}"):
                 return Response(
-                    json.dumps({"detail": "Colab V2 bearer authentication failed"}),
+                    json.dumps({"detail": "GPU V2 bearer authentication failed"}),
                     status_code=401,
                     media_type="application/json",
                     headers={"WWW-Authenticate": "Bearer"},
@@ -586,7 +770,7 @@ def create_app(service: ColabV2Service) -> Any:
             generation_id, outcome = service.generate(
                 str(payload.get("lock_id", "")),
                 category=str(payload.get("category", "cosmetics")),
-                variants=int(payload.get("variants", 1)),
+                variants=int(payload.get("variants", payload.get("variant_count", 1))),
                 seed=None if payload.get("seed") is None else int(payload["seed"]),
                 creative_direction=payload.get("creative_direction"),
             )
@@ -606,9 +790,15 @@ def create_app(service: ColabV2Service) -> Any:
     @app.get("/v2/generations/{generation_id}/variants/{variant_index}/image")
     def generation_image(generation_id: str, variant_index: int) -> Response:
         outcome = service.generations.get(generation_id)
-        if outcome is None or variant_index < 0 or variant_index >= len(outcome.variants):
+        artifacts = service.generation_artifacts.get(generation_id, ())
+        if outcome is None or variant_index < 0:
             raise HTTPException(status_code=404, detail="generation variant not found")
-        return Response(encode_png(outcome.variants[variant_index].image, mode="RGBA"), media_type="image/png", headers={"Cache-Control": "private, no-store"})
+        if variant_index >= len(artifacts):
+            path = service._generation_artifact_path(generation_id, variant_index)
+            if not path.is_file():
+                raise HTTPException(status_code=404, detail="generation variant not found")
+            artifacts = (path.read_bytes(),)
+        return Response(artifacts[variant_index], media_type="image/png", headers={"Cache-Control": "private, no-store"})
 
     @app.post("/v2/batches")
     async def batch(images: list[UploadFile] = File(...), category: str = Form(default="cosmetics"), creative_direction: str | None = Form(default=None)) -> dict[str, Any]:
@@ -619,58 +809,17 @@ def create_app(service: ColabV2Service) -> Any:
     return app
 
 
-_SERVER: Any | None = None
-
-
-def run_public_v2_server(service: ColabV2Service, port: int = 8000) -> str:
-    """Expose the V2 app through a temporary authenticated ngrok tunnel."""
-    if service.runtime.status != "ready":
-        raise RuntimeUnavailable("start the V2 runtime before starting the API")
-    try:
-        import uvicorn
-        from pyngrok import ngrok
-    except ImportError as exc:
-        raise RuntimeUnavailable("uvicorn and pyngrok are required") from exc
-    tunnel_token = os.getenv("NGROK_AUTHTOKEN", "").strip()
-    if not tunnel_token:
-        raise RuntimeUnavailable("NGROK_AUTHTOKEN is required")
-    service_token = os.getenv("COLAB_AI_TOKEN", "").strip() or secrets.token_urlsafe(48)
-    os.environ["COLAB_AI_TOKEN"] = service_token
-    app = create_app(service)
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info", access_log=False)
-    server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, name="campaign-studio-v2-api", daemon=True)
-    thread.start()
-    global _SERVER
-    _SERVER = server
-    for _ in range(100):
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.25):
-                break
-        except OSError:
-            time.sleep(0.1)
-    else:
-        raise RuntimeUnavailable(f"V2 API did not start on port {port}")
-    ngrok.set_auth_token(tunnel_token)
-    for tunnel in ngrok.get_tunnels():
-        try:
-            ngrok.disconnect(tunnel.public_url)
-        except Exception:
-            pass
-    public_url = ngrok.connect(str(port), "http").public_url
-    print(f"Campaign Studio V2 API: {public_url}")
-    print(f"COLAB_AI_TOKEN: {service_token}")
-    return public_url
-
-
 __all__ = [
-    "ColabDiffusersProvider",
-    "ColabSafetyDetectors",
-    "ColabV2Service",
+    "ExtractionOnlyProvider",
+    "CpuProductLockEngine",
+    "CpuProductLockRuntime",
+    "build_cpu_service",
+    "GpuDiffusersProvider",
+    "GpuSafetyDetectors",
+    "GpuV2Service",
     "FakeInpaintingAdapter",
     "TransformersGroundingDINO",
-    "TransformersSAM2Predictor",
+    "NativeSAM2Predictor",
     "build_service",
     "create_app",
-    "run_public_v2_server",
 ]

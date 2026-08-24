@@ -18,6 +18,8 @@
 **/artifacts
 **/generated
 **/outputs
+.private_dataset
+**/.private_dataset
 data/raw
 data/processed
 data/metadata

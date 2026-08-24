@@ -58,7 +58,7 @@ export const initialStudioState = (fixture = {}) => ({
     ...fixture.lock,
   },
   direction: {
-    mode: 'automatic',
+    mode: 'custom',
     category: 'skincare',
     audience: '',
     placement: 'Square social post',
@@ -77,6 +77,11 @@ export const initialStudioState = (fixture = {}) => ({
     stage: null,
     message: '',
     error: null,
+    baseline: null,
+    enhancement: null,
+    final_candidate: null,
+    qa: null,
+    manifest: null,
     startedAt: null,
     ...fixture.generation,
   },
@@ -285,7 +290,7 @@ export const isLockReady = (lock) =>
   lock.status === 'validated' && Boolean(lock.id && lock.maskUrl && lock.cutoutUrl)
 
 export const isGenerationReady = (state) =>
-  isLockReady(state.lock) && Boolean(state.direction.providerId) && state.direction.prompt.trim().length > 0
+  isLockReady(state.lock) && Boolean(state.direction.providerId) && state.direction.prompt.trim().length >= 12
 
 export const statusLabel = (status) =>
   ({
@@ -296,6 +301,9 @@ export const statusLabel = (status) =>
     rendering: 'Rendering variants',
     qa: 'Running QA',
     done: 'Ready for review',
+    baseline_ready: 'Baseline ready',
+    enhancing: 'High fidelity enhancement',
+    accepted_final: 'Final candidate accepted',
     canceled: 'Canceled',
     failed: 'Generation failed',
     uncertain: 'Completion uncertain',

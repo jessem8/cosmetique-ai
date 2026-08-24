@@ -66,6 +66,7 @@ function Login() {
           <p className="eyebrow">Espace privé</p>
           <h1>Accéder au studio</h1>
           <p>Retrouvez vos campagnes et démarrez un nouveau brief produit.</p>
+          <Link className="auth-card__back" to="/">Retour à la présentation</Link>
         </div>
 
         <form className="auth-form" onSubmit={handleSubmit} noValidate>
@@ -128,7 +129,7 @@ function Login() {
             </div>
           </div>
 
-          <button className="button button--primary button--wide" disabled={loading}>
+          <button className="button button--primary button--wide" type="submit" disabled={loading}>
             {loading ? 'Connexion en cours…' : 'Se connecter'}
           </button>
         </form>

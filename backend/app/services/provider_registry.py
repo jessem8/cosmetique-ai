@@ -21,68 +21,33 @@ class ProviderProfile:
 
 
 def _configured_profiles() -> tuple[ProviderProfile, ...]:
-    raw = [item.strip() for item in settings.V2_PROVIDER_ALLOWLIST.split(",") if item.strip()]
-    profiles: list[ProviderProfile] = []
-    for item in raw:
-        parts = item.split(":")
-        if len(parts) not in {2, 3}:
-            continue
-        provider, profile = parts[:2]
-        model = parts[2] if len(parts) == 3 else None
-        try:
-            selection = ProviderSelection(provider=provider, profile=profile, model=model)
-        except Exception:
-            continue
-        profiles.append(
-            ProviderProfile(
-                selection=selection,
-                capabilities=ProviderCapabilities(
-                    provider=provider,
-                    profile=profile,
-                    max_variants=settings.V2_MAX_VARIANTS,
-                    max_budget_micros=settings.V2_MAX_BUDGET_MICROS,
-                    estimated_cost_per_variant_micros=settings.V2_ESTIMATED_COST_PER_VARIANT_MICROS,
-                    supports_async=True,
-                    supports_cancellation=True,
-                    supports_unknown_completion_reconciliation=True,
-                    supports_product_lock=True,
-                    supports_mask_preservation=True,
-                    supports_scene_generation=True,
-                    supports_custom_direction=True,
-                    supports_qa_provenance=True,
-                    pipeline_version="2.0.0",
-                    description="Server-owned product-preserving Campaign Studio profile.",
-                ),
-            )
-        )
-    if profiles:
-        return tuple(profiles)
-    # Fail closed when a malformed environment variable is supplied.  The
-    # local default keeps development/test imports usable and has no network
-    # meaning by itself.
+    # The supported V2 workflow has one server-owned local profile. Ignore
+    # stale external-provider environment values so they cannot re-enter the
+    # browser contract or worker execution path.
     selection = ProviderSelection(
-        provider=settings.V2_DEFAULT_PROVIDER,
-        profile=settings.V2_DEFAULT_PROVIDER_PROFILE,
+        provider="product-extraction",
+        profile="native-sam2",
+        model=None,
     )
     return (
         ProviderProfile(
             selection=selection,
             capabilities=ProviderCapabilities(
-                provider=selection.provider,
-                profile=selection.profile,
-                max_variants=settings.V2_MAX_VARIANTS,
-                max_budget_micros=settings.V2_MAX_BUDGET_MICROS,
-                estimated_cost_per_variant_micros=settings.V2_ESTIMATED_COST_PER_VARIANT_MICROS,
+                provider="product-extraction",
+                profile="native-sam2",
+                max_variants=1,
+                max_budget_micros=0,
+                estimated_cost_per_variant_micros=0,
                 supports_async=True,
                 supports_cancellation=True,
                 supports_unknown_completion_reconciliation=True,
                 supports_product_lock=True,
                 supports_mask_preservation=True,
-                supports_scene_generation=True,
-                supports_custom_direction=True,
-                supports_qa_provenance=True,
-                pipeline_version="2.0.0",
-                description="Server-owned product-preserving Campaign Studio profile.",
+                supports_scene_generation=False,
+                supports_custom_direction=False,
+                supports_qa_provenance=False,
+                pipeline_version="2.1.0",
+                description="Native SAM2 product extraction with a canonical mask and transparent cutout. Background generation is disabled.",
             ),
         ),
     )

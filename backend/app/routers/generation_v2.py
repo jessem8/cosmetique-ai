@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from ai_core.schemas import GenerationRequestV2
+from app.core.config import settings
 from app.dependencies import CurrentUser, DBSession
 from app.models import (
     Generation,
@@ -20,10 +21,12 @@ from app.models import (
 )
 from app.schemas import (
     ErrorOut,
+    GenerationStageOut,
     GenerationV2History,
     GenerationV2Out,
     ProviderProfileOut,
 )
+from app.services.ai_client import AIClientError, AIRuntimeClient
 from app.services.generation_jobs import (
     decode_cursor,
     encode_cursor,
@@ -40,6 +43,56 @@ from app.services.storage import StorageError, storage
 
 router = APIRouter(prefix="/api/v2", tags=["Campaign Studio V2"])
 studio_router = APIRouter(prefix="/api/v1/studio/v2", tags=["Campaign Studio V2"])
+
+
+@studio_router.get("/engine/status")
+def get_studio_engine_status(current_user: CurrentUser) -> dict[str, object]:
+    """Project the private runtime health without exposing its URL or bearer."""
+
+    del current_user
+    try:
+        with AIRuntimeClient(
+            base_url=settings.AI_SERVICE_URL,
+            token=settings.AI_SERVICE_TOKEN,
+            connect_timeout_seconds=settings.AI_CONNECT_TIMEOUT_SECONDS,
+            read_timeout_seconds=settings.AI_READ_TIMEOUT_SECONDS,
+            health_timeout_seconds=settings.AI_HEALTH_TIMEOUT_SECONDS,
+        ) as runtime:
+            health = runtime.health()
+    except (AIClientError, ValueError) as exc:
+        return {
+            "status": "unavailable",
+            "ready": False,
+            "message": str(exc),
+            "runtime": "private-ai-runtime",
+            "gpu": "Indisponible",
+            "models": [],
+        }
+
+    ready = bool(health.ready and health.inference_ready)
+    engine_mode = str(getattr(health, "engine_mode", "unknown") or "unknown")
+    gpu_available = (
+        bool(health.gpu.get("available"))
+        if isinstance(health.gpu, dict)
+        else bool(health.gpu)
+    )
+    cpu_mode = engine_mode == "cpu-u2net"
+    return {
+        "status": "ready" if ready else "degraded",
+        "ready": ready,
+        "message": (
+            "Extraction CPU prête."
+            if ready and cpu_mode
+            else "Runtime GPU prêt pour l'extraction."
+            if ready
+            else "Le runtime prépare encore ses modèles."
+        ),
+        "runtime": health.runtime_id,
+        "engine_mode": engine_mode,
+        "gpu": "CPU U2Net" if cpu_mode else "CUDA disponible" if gpu_available else "CUDA indisponible",
+        "models": ["U2Net ONNX (CPU)"] if ready and cpu_mode else ["Grounding DINO", "SAM2.1"] if ready else [],
+        "phases": dict(health.phases),
+    }
 
 
 def _validate_idempotency_key(value: str) -> str:
@@ -77,6 +130,70 @@ def _owned_generation(
     return generation
 
 
+
+def _safe_public_value(value):
+    """Drop private storage/provider fields from browser metadata recursively."""
+    hidden = {
+        "storage_key",
+        "source_storage_key",
+        "artifact_url",
+        "runtime_url",
+        "internal_url",
+        "api_key",
+        "token",
+        "secret",
+    }
+    if isinstance(value, dict):
+        return {
+            str(key): _safe_public_value(item)
+            for key, item in value.items()
+            if str(key).casefold() not in hidden
+        }
+    if isinstance(value, list):
+        return [_safe_public_value(item) for item in value]
+    return value
+
+
+def _stage_projection(generation: Generation, stage: str) -> GenerationStageOut | None:
+    manifest = generation.artifact_manifest if isinstance(generation.artifact_manifest, dict) else {}
+    stages = manifest.get("stages") if isinstance(manifest.get("stages"), dict) else {}
+    value = stages.get(stage)
+    if not isinstance(value, dict):
+        return None
+    status_value = str(value.get("status") or "pending")
+    checksum = value.get("sha256") or value.get("checksum")
+    if not isinstance(checksum, str) or len(checksum) != 64:
+        checksum = None
+    storage_key = value.get("storage_key")
+    return GenerationStageOut(
+        status=status_value,
+        artifact_url=(
+            f"/api/v1/studio/v2/generations/{generation.id}/stages/{stage}"
+            if isinstance(storage_key, str) and storage_key and status_value in {"ready", "succeeded", "needs_review"}
+            else None
+        ),
+        checksum=checksum,
+        mime=str(value.get("mime")) if value.get("mime") else None,
+        bytes=int(value["bytes"]) if isinstance(value.get("bytes"), int) and value["bytes"] >= 0 else None,
+        model=str(value.get("model")) if value.get("model") else None,
+        model_revision=str(value.get("model_revision")) if value.get("model_revision") else None,
+        prompt_sha256=(
+            str(value.get("prompt_sha256"))
+            if isinstance(value.get("prompt_sha256"), str) and len(value["prompt_sha256"]) == 64
+            else None
+        ),
+        qa=_safe_public_value(value.get("qa")) if isinstance(value.get("qa"), dict) else None,
+        error=(
+            ErrorOut(
+                code=str(value.get("error_code") or "STAGE_FAILED"),
+                message=safe_error_message(str(value.get("error_code") or "INTERNAL_ERROR")),
+            )
+            if value.get("error_code")
+            else None
+        ),
+    )
+
+
 def generation_v2_out(generation: Generation) -> GenerationV2Out:
     try:
         request = GenerationRequestV2.model_validate(generation.request_v2 or {})
@@ -103,7 +220,7 @@ def generation_v2_out(generation: Generation) -> GenerationV2Out:
                 ),
                 "label": artifact_manifest.get("label") or f"Variant {variant.variant_index + 1}",
                 "platform": artifact_manifest.get("platform") or "campaign",
-                "manifest": artifact_manifest,
+                "manifest": _safe_public_value(artifact_manifest),
                 "qa": {
                     "status": "pass" if qa_passed else "review",
                     "passed": qa_passed,
@@ -150,6 +267,9 @@ def generation_v2_out(generation: Generation) -> GenerationV2Out:
         variant_count=generation.variant_count or request.variant_count,
         attempt_count=generation.attempt_count,
         provider_request_id=generation.provider_request_id,
+        baseline=_stage_projection(generation, "baseline"),
+        enhancement=_stage_projection(generation, "enhancement"),
+        final_candidate=_stage_projection(generation, "final_candidate"),
         unknown_remote_completion=bool(generation.unknown_remote_completion),
         cancellation_requested=bool(generation.cancellation_requested),
         budget_authorized_micros=generation.budget_authorized_micros or request.budget.max_cost_micros,
@@ -358,6 +478,39 @@ def list_generation_variants_v2(
     return {"variants": generation_v2_out(generation).variants}
 
 
+def get_generation_stage_image(
+    generation_id: uuid.UUID,
+    stage: str,
+    db: DBSession,
+    current_user: CurrentUser,
+) -> FileResponse:
+    generation = _owned_generation(db, generation_id, current_user.id)
+    if stage not in {"baseline", "enhancement", "final_candidate"}:
+        raise HTTPException(status_code=404, detail="Stage introuvable.")
+    manifest = generation.artifact_manifest if isinstance(generation.artifact_manifest, dict) else {}
+    stages = manifest.get("stages") if isinstance(manifest.get("stages"), dict) else {}
+    value = stages.get(stage)
+    key = value.get("storage_key") if isinstance(value, dict) else None
+    if not isinstance(key, str) or not key:
+        raise HTTPException(status_code=404, detail="Artifact de stage introuvable.")
+    try:
+        path = storage.path_for(key)
+        if not path.is_file() or path.is_symlink():
+            raise StorageError("missing")
+    except StorageError as exc:
+        raise HTTPException(status_code=404, detail="Artifact de stage introuvable.") from exc
+    mime = str(value.get("mime") or "image/png") if isinstance(value, dict) else "image/png"
+    response = FileResponse(
+        path,
+        media_type=mime,
+        filename=f"{stage}-{generation.id}.png",
+        content_disposition_type="inline",
+    )
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
 def get_generation_variant_image(
     generation_id: uuid.UUID,
     variant_id: uuid.UUID,
@@ -495,6 +648,18 @@ studio_router.add_api_route(
     "/generations/{generation_id}/variants",
     list_generation_variants_v2,
     methods=["GET"],
+)
+router.add_api_route(
+    "/generations/{generation_id}/stages/{stage}",
+    get_generation_stage_image,
+    methods=["GET"],
+    response_class=FileResponse,
+)
+studio_router.add_api_route(
+    "/generations/{generation_id}/stages/{stage}",
+    get_generation_stage_image,
+    methods=["GET"],
+    response_class=FileResponse,
 )
 router.add_api_route(
     "/generations/{generation_id}/variants/{variant_id}/image",

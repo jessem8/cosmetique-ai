@@ -396,32 +396,37 @@ class CloseRouterAdapter:
         if operation in {"edit", "inpaint", "inpainting"}:
             if not spec.image_bytes:
                 raise ProviderProtocolError("image edit requires source image bytes")
-            # Inline data URLs are accepted by CloseRouter and avoid leaking a
-            # private object URL to a remote provider.
-            body: dict[str, Any] = {
+            fields: dict[str, Any] = {
                 "model": plan.capabilities.model,
                 "prompt": spec.prompt,
-                "image": self._data_url(spec.image_bytes, spec.image_mime),
                 "size": f"{spec.width}x{spec.height}",
             }
+            if spec.negative_prompt:
+                fields["negative_prompt"] = spec.negative_prompt
+            if spec.seed is not None:
+                fields["seed"] = str(spec.seed)
+            fields.update(provider_options)
+            fields["response_format"] = "b64_json"
+            files: dict[str, Any] = {
+                "image": ("image.png", spec.image_bytes, spec.image_mime),
+            }
             if spec.mask_bytes is not None:
-                body["mask"] = self._data_url(spec.mask_bytes, "image/png")
-            if spec.negative_prompt:
-                body["negative_prompt"] = spec.negative_prompt
-            if spec.seed is not None:
-                body["seed"] = spec.seed
-            body.update(provider_options)
-            body["response_format"] = "b64_json"
-            path = "images/edits"
-        else:
-            body = {"model": plan.capabilities.model, "prompt": spec.prompt, "size": f"{spec.width}x{spec.height}", "n": 1}
-            if spec.negative_prompt:
-                body["negative_prompt"] = spec.negative_prompt
-            if spec.seed is not None:
-                body["seed"] = spec.seed
-            body.update(provider_options)
-            body["response_format"] = "b64_json"
-            path = "images/generations"
+                files["mask"] = ("mask.png", spec.mask_bytes, "image/png")
+            return ProviderRequest(
+                method="POST",
+                url=self._url("images/edits"),
+                headers={"Accept": "application/json", "X-Request-ID": plan.request_id},
+                data=fields,
+                files=files,
+            )
+        body = {"model": plan.capabilities.model, "prompt": spec.prompt, "size": f"{spec.width}x{spec.height}", "n": 1}
+        if spec.negative_prompt:
+            body["negative_prompt"] = spec.negative_prompt
+        if spec.seed is not None:
+            body["seed"] = spec.seed
+        body.update(provider_options)
+        body["response_format"] = "b64_json"
+        path = "images/generations"
         return ProviderRequest(
             method="POST",
             url=self._url(path),

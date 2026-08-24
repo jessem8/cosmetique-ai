@@ -28,6 +28,7 @@ coverage/
 playwright-report/
 test-results/
 .vitest-localstorage.json
+.vitest-localstorage.json-*
 
 # Runtime and private data
 uploads/
@@ -46,3 +47,8 @@ evaluation/private/
 Thumbs.db
 .idea/
 .vscode/
+
+# Local agent and browser acceptance artifacts
+.kilo/
+frontend/.playwright-cli/
+reports/live_acceptance_20260823/

@@ -63,17 +63,36 @@ class DiffusersInpaintingAdapter:
     ) -> Image.Image:
         source = image.convert("RGB")
         canonical_mask = _coerce_mask(mask, source.size)
+
+        # SDXL requires dimensions divisible by 8 and a full-resolution phone
+        # photo is far beyond the memory budget of an 8 GB GPU. Fit the model
+        # working canvas inside 1024 px while preserving aspect ratio, then
+        # restore the generated scene to the canonical source size. Product
+        # pixels are restored separately by Product Lock after this adapter.
+        scale = min(1.0, 1024 / max(source.size))
+        working_width = max(8, int(source.width * scale) // 8 * 8)
+        working_height = max(8, int(source.height * scale) // 8 * 8)
+        working_size = (working_width, working_height)
+        working_source = (
+            source
+            if source.size == working_size
+            else source.resize(working_size, Image.Resampling.LANCZOS)
+        )
+        working_mask = (
+            canonical_mask
+            if canonical_mask.size == working_size
+            else canonical_mask.resize(working_size, Image.Resampling.NEAREST)
+        )
+
         pipeline = self._get_pipeline()
         call: dict[str, Any] = {
             "prompt": prompt,
-            "image": source,
-            "mask_image": canonical_mask,
+            "image": working_source,
+            "mask_image": working_mask,
             "negative_prompt": negative_prompt,
+            "width": working_width,
+            "height": working_height,
         }
-        if width is not None:
-            call["width"] = int(width)
-        if height is not None:
-            call["height"] = int(height)
         if seed is not None:
             # Torch remains optional and is imported only when a seeded call is
             # requested.  A caller can also inject a generator through kwargs.

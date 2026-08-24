@@ -1,4 +1,4 @@
-import { CheckCircle, ImageSquare, Scissors, UploadSimple, X } from '@phosphor-icons/react'
+import { CheckCircle, ImageSquare, Scissors, SpinnerGap, UploadSimple, X } from '@phosphor-icons/react'
 import { STUDIO_COPY } from './copy.js'
 
 function SourceFigure({ image, stored }) {
@@ -80,6 +80,12 @@ export default function SourcePanel({ source, file, preview, busy, onChange, onF
               {busy ? STUDIO_COPY.source.creatingLock : stored ? STUDIO_COPY.source.refreshLock : STUDIO_COPY.source.createLock}
             </button>
           </div>
+          {busy && (
+            <div className="atelier-extraction-loader" role="status" aria-live="polite">
+              <SpinnerGap size={22} className="atelier-spin" aria-hidden="true" />
+              <div><strong>Extraction du produit en cours</strong><span>Le runtime GPU détecte le produit, construit le masque et prépare le détourage transparent.</span></div>
+            </div>
+          )}
           <p className="atelier-helper">{STUDIO_COPY.source.helper}</p>
         </form>
       </div>

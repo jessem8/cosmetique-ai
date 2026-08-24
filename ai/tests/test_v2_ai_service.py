@@ -71,6 +71,17 @@ def test_product_lock_abstains_without_mask_and_flags_suspicious_mask() -> None:
         assert_mask_accepted(suspicious)
 
 
+def test_product_lock_rejects_tiny_prompt_marker_mask() -> None:
+    source = _jpeg_source((100, 100))
+    tiny = Image.new("L", (100, 100), 0)
+    ImageDraw.Draw(tiny).ellipse((47, 47, 52, 52), fill=255)
+
+    lock = ProductLockProcessor().create(source, mask=tiny)
+
+    assert lock.status is ProductLockStatus.NEEDS_REVIEW
+    assert "mask_too_small" in lock.reasons
+
+
 def test_refinement_contract_is_normalized_and_returns_new_revision() -> None:
     processor = ProductLockProcessor()
     first = processor.create(_jpeg_source(), mask=_mask())
@@ -190,6 +201,25 @@ def test_diffusers_mask_convention_white_modifies_black_preserves() -> None:
     assert output.size == source.size
 
 
+def test_diffusers_bounds_large_portrait_inputs_to_sdxl_safe_dimensions() -> None:
+    captured: dict[str, object] = {}
+
+    def pipeline(**kwargs):
+        captured.update(kwargs)
+        return kwargs["image"]
+
+    source = Image.new("RGB", (2268, 4032), (10, 20, 30))
+    mask = Image.new("L", source.size, 255)
+    adapter = DiffusersInpaintingAdapter(pipeline=pipeline)
+    output = adapter.inpaint(source, mask, "scene", width=2268, height=4032)
+
+    assert captured["image"].size == (576, 1024)
+    assert captured["mask_image"].size == (576, 1024)
+    assert captured["width"] == 576
+    assert captured["height"] == 1024
+    assert output.size == source.size
+
+
 def test_closerouter_mocked_discovery_preflight_edit_and_normalization_without_credit_gate() -> None:
     result_image = Image.new("RGB", (8, 8), (80, 90, 100))
     result_bytes = io.BytesIO()
@@ -206,12 +236,14 @@ def test_closerouter_mocked_discovery_preflight_edit_and_normalization_without_c
             # block an otherwise valid allowlisted request.
             return httpx.Response(200, json={"credits": 0.0})
         if request.url.path == "/v1/images/edits":
-            body = json.loads(request.content.decode("utf-8"))
-            assert body["image"].startswith("data:image/png;base64,")
-            assert "https://" not in body["image"]
-            assert body["quality"] == "medium"
-            assert body["input_fidelity"] == "high"
-            assert body["output_format"] == "png"
+            content_type = request.headers["content-type"]
+            assert content_type.startswith("multipart/form-data; boundary=")
+            body = request.content
+            assert b'name="image"; filename="image.png"' in body
+            assert b'name="model"' in body and b"edit-model" in body
+            assert b'name="quality"' in body and b"medium" in body
+            assert b'name="input_fidelity"' in body and b"high" in body
+            assert b'name="output_format"' in body and b"png" in body
             return httpx.Response(200, json={"data": [{"b64_json": encoded}], "usage": {"images": 1}, "cost_usd": 0.02})
         raise AssertionError(request.url.path)
 
